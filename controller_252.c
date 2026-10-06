@@ -9,7 +9,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Personalized RemoteOps values */
+/* =========================================================
+   Personalized RemoteOps values
+   ========================================================= */
+
 #define PORT 9410
 #define AUTH_TOKEN "OPS-3252"
 #define SID "2523"
@@ -17,7 +20,7 @@
 
 
 /* =========================================================
-   Receive one newline-terminated line
+   Receive one newline-terminated protocol line
    ========================================================= */
 
 ssize_t recv_line(int sockfd, char *buffer, size_t size)
@@ -33,8 +36,15 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
     {
         char ch;
 
-        ssize_t n = recv(sockfd, &ch, 1, 0);
+        ssize_t n = recv(sockfd,
+                         &ch,
+                         1,
+                         0);
 
+        /*
+         * n == 0 means the other side closed
+         * the TCP connection.
+         */
         if (n == 0)
         {
             if (total == 0)
@@ -45,6 +55,9 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
             break;
         }
 
+        /*
+         * n < 0 means recv() failed.
+         */
         if (n < 0)
         {
             if (errno == EINTR)
@@ -55,11 +68,18 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
             return -1;
         }
 
+        /*
+         * Newline marks the end of one
+         * protocol line.
+         */
         if (ch == '\n')
         {
             break;
         }
 
+        /*
+         * Ignore carriage return.
+         */
         if (ch != '\r')
         {
             buffer[total++] = ch;
@@ -76,7 +96,9 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
    Send all bytes
    ========================================================= */
 
-int send_all(int sockfd, const char *data, size_t length)
+int send_all(int sockfd,
+             const char *data,
+             size_t length)
 {
     size_t total_sent = 0;
 
@@ -110,7 +132,12 @@ int send_all(int sockfd, const char *data, size_t length)
 
 
 /* =========================================================
-   Receive multi-line response
+   Receive a multi-line response
+
+   Used by:
+       SYSINFO
+       LISTPROC
+       EXEC
    ========================================================= */
 
 int receive_command_response(int sockfd,
@@ -125,33 +152,55 @@ int receive_command_response(int sockfd,
                       buffer,
                       sizeof(buffer));
 
+        /*
+         * Agent disconnected.
+         */
         if (n == 0)
         {
             printf("Agent closed the connection.\n");
+
             return -1;
         }
 
+        /*
+         * recv() failed.
+         */
         if (n < 0)
         {
             perror("recv");
+
             return -1;
         }
 
-        printf("%s\n", buffer);
+        /*
+         * Display every line received
+         * from the Agent.
+         */
+        printf("%s\n",
+               buffer);
+
 
         /*
-         * Stop reading when the expected END marker
+         * Stop when expected END marker
          * is received.
          */
-        if (strcmp(buffer, end_marker) == 0)
+        if (strcmp(buffer,
+                   end_marker) == 0)
         {
             break;
         }
 
+
         /*
-         * Also stop if Agent returned an error.
+         * If Agent returns an error,
+         * there will be no END marker.
+         *
+         * Therefore stop reading and
+         * return to RemoteOps prompt.
          */
-        if (strncmp(buffer, "ERR ", 4) == 0)
+        if (strncmp(buffer,
+                    "ERR ",
+                    4) == 0)
         {
             break;
         }
@@ -160,6 +209,10 @@ int receive_command_response(int sockfd,
     return 0;
 }
 
+
+/* =========================================================
+   Main Controller
+   ========================================================= */
 
 int main(int argc, char *argv[])
 {
@@ -173,7 +226,7 @@ int main(int argc, char *argv[])
 
 
     /* =====================================================
-       STEP 1: Check Agent IP argument
+       STEP 1: Check command-line argument
        ===================================================== */
 
     if (argc != 2)
@@ -212,6 +265,7 @@ int main(int argc, char *argv[])
     memset(&agent_addr,
            0,
            sizeof(agent_addr));
+
 
     agent_addr.sin_family = AF_INET;
 
@@ -257,7 +311,7 @@ int main(int argc, char *argv[])
 
 
     /* =====================================================
-       STEP 5: Send AUTH
+       STEP 5: Send AUTH command
        ===================================================== */
 
     const char *auth_command =
@@ -289,10 +343,20 @@ int main(int argc, char *argv[])
                   sizeof(buffer));
 
 
-    if (bytes_received <= 0)
+    if (bytes_received == 0)
     {
         fprintf(stderr,
-                "Failed to receive AUTH response.\n");
+                "Agent closed connection without AUTH response.\n");
+
+        close(sockfd);
+
+        return EXIT_FAILURE;
+    }
+
+
+    if (bytes_received < 0)
+    {
+        perror("recv");
 
         close(sockfd);
 
@@ -304,6 +368,10 @@ int main(int argc, char *argv[])
            buffer);
 
 
+    /*
+     * Verify personalized successful
+     * authentication response.
+     */
     if (strcmp(buffer,
                "OK AUTHENTICATED SID:" SID) != 0)
     {
@@ -317,6 +385,7 @@ int main(int argc, char *argv[])
 
 
     printf("Authentication successful.\n");
+
     printf("RemoteOps session SID: %s\n\n",
            SID);
 
@@ -332,23 +401,28 @@ int main(int argc, char *argv[])
         fflush(stdout);
 
 
+        /*
+         * Read command from keyboard.
+         */
         if (fgets(buffer,
                   sizeof(buffer),
                   stdin) == NULL)
         {
             printf("\nInput closed.\n");
+
             break;
         }
 
 
         /*
-         * Remove newline typed by user.
+         * Remove newline / carriage return
+         * entered by the user.
          */
         buffer[strcspn(buffer, "\r\n")] = '\0';
 
 
         /*
-         * Ignore empty commands.
+         * Ignore empty command.
          */
         if (strlen(buffer) == 0)
         {
@@ -356,9 +430,9 @@ int main(int argc, char *argv[])
         }
 
 
-        /* ================================================
+        /* =================================================
            SYSINFO
-           ================================================ */
+           ================================================= */
 
         if (strcmp(buffer,
                    "SYSINFO") == 0)
@@ -372,6 +446,7 @@ int main(int argc, char *argv[])
                          strlen(command)) < 0)
             {
                 perror("send");
+
                 break;
             }
 
@@ -385,9 +460,9 @@ int main(int argc, char *argv[])
         }
 
 
-        /* ================================================
+        /* =================================================
            LISTPROC
-           ================================================ */
+           ================================================= */
 
         else if (strcmp(buffer,
                         "LISTPROC") == 0)
@@ -401,6 +476,7 @@ int main(int argc, char *argv[])
                          strlen(command)) < 0)
             {
                 perror("send");
+
                 break;
             }
 
@@ -414,32 +490,124 @@ int main(int argc, char *argv[])
         }
 
 
-        /* ================================================
-           Temporary local exit
-           ================================================ */
+        /* =================================================
+           EXEC
+           ================================================= */
+
+        else if (strncmp(buffer,
+                         "EXEC ",
+                         5) == 0)
+        {
+            char command[BUFFER_SIZE + 2];
+
+            char end_marker[BUFFER_SIZE];
+
+            char exec_name[32];
+
+
+            /*
+             * Example:
+             *
+             * buffer = "EXEC DATE"
+             *
+             * buffer + 5 points to:
+             *
+             * "DATE"
+             */
+            snprintf(exec_name,
+                     sizeof(exec_name),
+                     "%.31s",
+                     buffer + 5);
+
+
+            /*
+             * Add protocol newline.
+             *
+             * "EXEC DATE"
+             *
+             * becomes:
+             *
+             * "EXEC DATE\n"
+             */
+            snprintf(command,
+                     sizeof(command),
+                     "%s\n",
+                     buffer);
+
+
+            /*
+             * Send EXEC command to Agent.
+             */
+            if (send_all(sockfd,
+                         command,
+                         strlen(command)) < 0)
+            {
+                perror("send");
+
+                break;
+            }
+
+
+            /*
+             * Create expected END marker.
+             *
+             * Example:
+             *
+             * END EXEC DATE SID:2523
+             */
+            snprintf(end_marker,
+                     sizeof(end_marker),
+                     "END EXEC %s SID:%s",
+                     exec_name,
+                     SID);
+
+
+            /*
+             * Receive all EXEC output until
+             * END marker or ERR response.
+             */
+            if (receive_command_response(
+                    sockfd,
+                    end_marker) < 0)
+            {
+                break;
+            }
+        }
+
+
+        /* =================================================
+           Temporary EXIT
+           ================================================= */
 
         else if (strcmp(buffer,
                         "EXIT") == 0)
         {
             /*
-             * Proper protocol QUIT will be implemented
-             * in a later part.
+             * EXIT currently closes the
+             * Controller locally.
+             *
+             * We will implement the assignment's
+             * proper graceful QUIT protocol later.
              */
+
             printf("Closing Controller.\n");
 
             break;
         }
 
 
-        /* ================================================
+        /* =================================================
            Other commands
-           ================================================ */
+           ================================================= */
 
         else
         {
             char command[BUFFER_SIZE + 2];
 
 
+            /*
+             * Add newline before sending.
+             */
             snprintf(command,
                      sizeof(command),
                      "%s\n",
@@ -451,19 +619,33 @@ int main(int argc, char *argv[])
                          strlen(command)) < 0)
             {
                 perror("send");
+
                 break;
             }
 
 
+            /*
+             * Unknown commands currently produce
+             * a single-line Agent response.
+             */
             bytes_received =
                 recv_line(sockfd,
                           buffer,
                           sizeof(buffer));
 
 
-            if (bytes_received <= 0)
+            if (bytes_received == 0)
             {
                 printf("Agent disconnected.\n");
+
+                break;
+            }
+
+
+            if (bytes_received < 0)
+            {
+                perror("recv");
+
                 break;
             }
 

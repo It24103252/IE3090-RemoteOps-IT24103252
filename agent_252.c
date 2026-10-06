@@ -111,7 +111,7 @@ int send_all(int sockfd, const char *data, size_t length)
 
 
 /* =========================================================
-   Send SYSINFO
+   SYSINFO
    ========================================================= */
 
 void handle_sysinfo(int client_fd)
@@ -119,33 +119,26 @@ void handle_sysinfo(int client_fd)
     FILE *fp;
     char line[BUFFER_SIZE];
 
-    /*
-     * uname provides useful Linux system information.
-     */
     fp = popen("uname -a", "r");
 
     if (fp == NULL)
     {
-        const char *error_response =
+        const char *response =
             "ERR SYSINFO_FAILED SID:" SID "\n";
 
         send_all(client_fd,
-                 error_response,
-                 strlen(error_response));
+                 response,
+                 strlen(response));
 
         return;
     }
 
-    /*
-     * Send a clear start marker.
-     */
     const char *start =
         "OK SYSINFO SID:" SID "\n";
 
     send_all(client_fd,
              start,
              strlen(start));
-
 
     while (fgets(line, sizeof(line), fp) != NULL)
     {
@@ -156,11 +149,6 @@ void handle_sysinfo(int client_fd)
 
     pclose(fp);
 
-
-    /*
-     * End marker tells Controller that SYSINFO output
-     * has finished.
-     */
     const char *end =
         "END SYSINFO SID:" SID "\n";
 
@@ -171,7 +159,7 @@ void handle_sysinfo(int client_fd)
 
 
 /* =========================================================
-   Send process list
+   LISTPROC
    ========================================================= */
 
 void handle_listproc(int client_fd)
@@ -179,23 +167,19 @@ void handle_listproc(int client_fd)
     FILE *fp;
     char line[BUFFER_SIZE];
 
-    /*
-     * ps displays currently running processes.
-     */
     fp = popen("ps -eo pid,comm", "r");
 
     if (fp == NULL)
     {
-        const char *error_response =
+        const char *response =
             "ERR LISTPROC_FAILED SID:" SID "\n";
 
         send_all(client_fd,
-                 error_response,
-                 strlen(error_response));
+                 response,
+                 strlen(response));
 
         return;
     }
-
 
     const char *start =
         "OK LISTPROC SID:" SID "\n";
@@ -203,7 +187,6 @@ void handle_listproc(int client_fd)
     send_all(client_fd,
              start,
              strlen(start));
-
 
     while (fgets(line, sizeof(line), fp) != NULL)
     {
@@ -214,13 +197,118 @@ void handle_listproc(int client_fd)
 
     pclose(fp);
 
-
     const char *end =
         "END LISTPROC SID:" SID "\n";
 
     send_all(client_fd,
              end,
              strlen(end));
+}
+
+
+/* =========================================================
+   EXEC whitelist
+   ========================================================= */
+
+void handle_exec(int client_fd, const char *exec_name)
+{
+    const char *system_command = NULL;
+
+    /*
+     * IMPORTANT:
+     * Only the five commands required by the assignment
+     * are permitted.
+     */
+
+    if (strcmp(exec_name, "DATE") == 0)
+    {
+        system_command = "date";
+    }
+    else if (strcmp(exec_name, "UPTIME") == 0)
+    {
+        system_command = "uptime";
+    }
+    else if (strcmp(exec_name, "DISKFREE") == 0)
+    {
+        system_command = "df -h";
+    }
+    else if (strcmp(exec_name, "HOSTNAME") == 0)
+    {
+        system_command = "hostname";
+    }
+    else if (strcmp(exec_name, "WHOAMI") == 0)
+    {
+        system_command = "whoami";
+    }
+    else
+    {
+        const char *response =
+            "ERR EXEC_NOT_ALLOWED SID:" SID "\n";
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+
+        return;
+    }
+
+
+    /*
+     * At this point the command has passed the whitelist.
+     */
+
+    FILE *fp = popen(system_command, "r");
+
+    if (fp == NULL)
+    {
+        const char *response =
+            "ERR EXEC_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+
+        return;
+    }
+
+
+    char response[BUFFER_SIZE];
+
+    snprintf(response,
+             sizeof(response),
+             "OK EXEC %s SID:%s\n",
+             exec_name,
+             SID);
+
+    send_all(client_fd,
+             response,
+             strlen(response));
+
+
+    char line[BUFFER_SIZE];
+
+    while (fgets(line,
+                 sizeof(line),
+                 fp) != NULL)
+    {
+        send_all(client_fd,
+                 line,
+                 strlen(line));
+    }
+
+
+    pclose(fp);
+
+
+    snprintf(response,
+             sizeof(response),
+             "END EXEC %s SID:%s\n",
+             exec_name,
+             SID);
+
+    send_all(client_fd,
+             response,
+             strlen(response));
 }
 
 
@@ -240,11 +328,14 @@ int main(void)
        STEP 1: Create TCP socket
        ===================================================== */
 
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server_fd = socket(AF_INET,
+                       SOCK_STREAM,
+                       0);
 
     if (server_fd < 0)
     {
         perror("socket");
+
         return EXIT_FAILURE;
     }
 
@@ -270,16 +361,20 @@ int main(void)
 
 
     /* =====================================================
-       STEP 3: Prepare Agent address
+       STEP 3: Prepare server address
        ===================================================== */
 
-    memset(&server_addr, 0, sizeof(server_addr));
+    memset(&server_addr,
+           0,
+           sizeof(server_addr));
 
     server_addr.sin_family = AF_INET;
 
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_addr.s_addr =
+        htonl(INADDR_ANY);
 
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_port =
+        htons(PORT);
 
 
     /* =====================================================
@@ -297,6 +392,7 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+
     printf("Agent bound to TCP port %d.\n",
            PORT);
 
@@ -305,7 +401,8 @@ int main(void)
        STEP 5: Listen
        ===================================================== */
 
-    if (listen(server_fd, BACKLOG) < 0)
+    if (listen(server_fd,
+               BACKLOG) < 0)
     {
         perror("listen");
 
@@ -319,23 +416,25 @@ int main(void)
            PORT);
 
 
-    /* Prevent zombie children */
+    /* Prevent zombie child processes */
 
     signal(SIGCHLD, SIG_IGN);
 
 
     /* =====================================================
-       STEP 6: Accept Controllers continuously
+       STEP 6: Accept Controllers
        ===================================================== */
 
     while (1)
     {
-        client_len = sizeof(client_addr);
+        client_len =
+            sizeof(client_addr);
 
 
-        client_fd = accept(server_fd,
-                           (struct sockaddr *)&client_addr,
-                           &client_len);
+        client_fd =
+            accept(server_fd,
+                   (struct sockaddr *)&client_addr,
+                   &client_len);
 
 
         if (client_fd < 0)
@@ -357,7 +456,7 @@ int main(void)
 
 
         /* =================================================
-           STEP 7: Fork child
+           STEP 7: Fork
            ================================================= */
 
         pid_t pid = fork();
@@ -396,7 +495,7 @@ int main(void)
 
 
             /* =============================================
-               STEP 8: AUTH must be first
+               STEP 8: AUTH
                ============================================= */
 
             bytes_received =
@@ -520,6 +619,24 @@ int main(void)
                                 "LISTPROC") == 0)
                 {
                     handle_listproc(client_fd);
+                }
+
+
+                /* =========================================
+                   EXEC
+                   ========================================= */
+
+                else if (strncmp(buffer,
+                                 "EXEC ",
+                                 5) == 0)
+                {
+                    /*
+                     * Everything after "EXEC " is passed
+                     * to the whitelist checker.
+                     */
+
+                    handle_exec(client_fd,
+                                buffer + 5);
                 }
 
 
