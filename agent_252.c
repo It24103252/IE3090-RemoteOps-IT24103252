@@ -10,18 +10,29 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+
+/* =========================================================
+   Personalized RemoteOps values
+   ========================================================= */
+
 #define PORT 9410
 #define BACKLOG 10
 #define AUTH_TOKEN "OPS-3252"
 #define SID "2523"
 #define BUFFER_SIZE 1024
 
+#define MAX_FILE_SIZE (10 * 1024 * 1024)
+
+#define STORAGE_DIR "./agentfiles/IT24103252"
+
 
 /* =========================================================
    Receive one newline-terminated protocol line
    ========================================================= */
 
-ssize_t recv_line(int sockfd, char *buffer, size_t size)
+ssize_t recv_line(int sockfd,
+                  char *buffer,
+                  size_t size)
 {
     size_t total = 0;
 
@@ -34,7 +45,10 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
     {
         char ch;
 
-        ssize_t n = recv(sockfd, &ch, 1, 0);
+        ssize_t n = recv(sockfd,
+                         &ch,
+                         1,
+                         0);
 
         if (n == 0)
         {
@@ -77,7 +91,9 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
    Send all bytes
    ========================================================= */
 
-int send_all(int sockfd, const char *data, size_t length)
+int send_all(int sockfd,
+             const char *data,
+             size_t length)
 {
     size_t total_sent = 0;
 
@@ -111,15 +127,312 @@ int send_all(int sockfd, const char *data, size_t length)
 
 
 /* =========================================================
+   Receive exactly filesize raw bytes and write them to file
+   ========================================================= */
+
+int receive_file_bytes(int sockfd,
+                       FILE *file,
+                       size_t filesize)
+{
+    char buffer[4096];
+
+    size_t total_received = 0;
+
+    while (total_received < filesize)
+    {
+        size_t remaining =
+            filesize - total_received;
+
+        size_t chunk_size =
+            remaining < sizeof(buffer)
+            ? remaining
+            : sizeof(buffer);
+
+        ssize_t n = recv(sockfd,
+                         buffer,
+                         chunk_size,
+                         0);
+
+        /*
+         * Connection closed before all expected
+         * file bytes were received.
+         */
+        if (n == 0)
+        {
+            return -1;
+        }
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -1;
+        }
+
+        size_t written =
+            fwrite(buffer,
+                   1,
+                   (size_t)n,
+                   file);
+
+        if (written != (size_t)n)
+        {
+            return -1;
+        }
+
+        total_received += (size_t)n;
+    }
+
+    return 0;
+}
+
+
+/* =========================================================
+   Validate uploaded filename
+   ========================================================= */
+
+int valid_filename(const char *filename)
+{
+    /*
+     * Filename cannot be NULL or empty.
+     */
+    if (filename == NULL ||
+        filename[0] == '\0')
+    {
+        return 0;
+    }
+
+    /*
+     * Do not allow ".." because it could be
+     * used for directory traversal.
+     */
+    if (strstr(filename,
+               "..") != NULL)
+    {
+        return 0;
+    }
+
+    /*
+     * Controller should send only a filename,
+     * not a Unix path.
+     */
+    if (strchr(filename,
+               '/') != NULL)
+    {
+        return 0;
+    }
+
+    /*
+     * Also reject Windows-style path separators.
+     */
+    if (strchr(filename,
+               '\\') != NULL)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+
+/* =========================================================
+   Handle PUT upload
+   ========================================================= */
+
+void handle_put(int client_fd,
+                const char *filename,
+                size_t filesize)
+{
+    char filepath[512];
+
+    char response[BUFFER_SIZE];
+
+
+    /* -----------------------------------------------------
+       Validate filename
+       ----------------------------------------------------- */
+
+    if (!valid_filename(filename))
+    {
+        const char *error_response =
+            "ERR INVALID_FILENAME SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+       Check maximum file size
+       ----------------------------------------------------- */
+
+    if (filesize > MAX_FILE_SIZE)
+    {
+        const char *error_response =
+            "ERR 004 FILE_TOO_LARGE SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+       Build personalized destination path
+
+       Example:
+       ./agentfiles/IT24103252/put_test.txt
+       ----------------------------------------------------- */
+
+    int path_length =
+        snprintf(filepath,
+                 sizeof(filepath),
+                 "%s/%s",
+                 STORAGE_DIR,
+                 filename);
+
+
+    if (path_length < 0 ||
+        (size_t)path_length >= sizeof(filepath))
+    {
+        const char *error_response =
+            "ERR INVALID_FILENAME SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+       Open destination in binary-write mode
+       ----------------------------------------------------- */
+
+    FILE *file =
+        fopen(filepath,
+              "wb");
+
+
+    if (file == NULL)
+    {
+        perror("fopen");
+
+        const char *error_response =
+            "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    printf("[Child %d] Receiving file %s (%zu bytes)\n",
+           getpid(),
+           filename,
+           filesize);
+
+
+    /* -----------------------------------------------------
+       Receive exactly <filesize> raw bytes
+       ----------------------------------------------------- */
+
+    if (receive_file_bytes(client_fd,
+                           file,
+                           filesize) < 0)
+    {
+        fclose(file);
+
+        /*
+         * Remove an incomplete file.
+         */
+        remove(filepath);
+
+
+        printf("[Child %d] File transfer failed: %s\n",
+               getpid(),
+               filename);
+
+
+        const char *error_response =
+            "ERR FILE_RECEIVE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    if (fclose(file) != 0)
+    {
+        remove(filepath);
+
+        const char *error_response =
+            "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+       Successful PUT response
+       ----------------------------------------------------- */
+
+    snprintf(response,
+             sizeof(response),
+             "OK FILE_RECEIVED %s SID:%s\n",
+             filename,
+             SID);
+
+
+    if (send_all(client_fd,
+                 response,
+                 strlen(response)) < 0)
+    {
+        perror("send");
+
+        return;
+    }
+
+
+    printf("[Child %d] File received successfully: %s (%zu bytes)\n",
+           getpid(),
+           filename,
+           filesize);
+}
+
+
+/* =========================================================
    SYSINFO
    ========================================================= */
 
 void handle_sysinfo(int client_fd)
 {
     FILE *fp;
+
     char line[BUFFER_SIZE];
 
-    fp = popen("uname -a", "r");
+
+    fp = popen("uname -a",
+               "r");
+
 
     if (fp == NULL)
     {
@@ -133,24 +446,32 @@ void handle_sysinfo(int client_fd)
         return;
     }
 
+
     const char *start =
         "OK SYSINFO SID:" SID "\n";
+
 
     send_all(client_fd,
              start,
              strlen(start));
 
-    while (fgets(line, sizeof(line), fp) != NULL)
+
+    while (fgets(line,
+                 sizeof(line),
+                 fp) != NULL)
     {
         send_all(client_fd,
                  line,
                  strlen(line));
     }
 
+
     pclose(fp);
+
 
     const char *end =
         "END SYSINFO SID:" SID "\n";
+
 
     send_all(client_fd,
              end,
@@ -165,9 +486,13 @@ void handle_sysinfo(int client_fd)
 void handle_listproc(int client_fd)
 {
     FILE *fp;
+
     char line[BUFFER_SIZE];
 
-    fp = popen("ps -eo pid,comm", "r");
+
+    fp = popen("ps -eo pid,comm",
+               "r");
+
 
     if (fp == NULL)
     {
@@ -181,24 +506,32 @@ void handle_listproc(int client_fd)
         return;
     }
 
+
     const char *start =
         "OK LISTPROC SID:" SID "\n";
+
 
     send_all(client_fd,
              start,
              strlen(start));
 
-    while (fgets(line, sizeof(line), fp) != NULL)
+
+    while (fgets(line,
+                 sizeof(line),
+                 fp) != NULL)
     {
         send_all(client_fd,
                  line,
                  strlen(line));
     }
 
+
     pclose(fp);
+
 
     const char *end =
         "END LISTPROC SID:" SID "\n";
+
 
     send_all(client_fd,
              end,
@@ -210,36 +543,42 @@ void handle_listproc(int client_fd)
    EXEC whitelist
    ========================================================= */
 
-void handle_exec(int client_fd, const char *exec_name)
+void handle_exec(int client_fd,
+                 const char *exec_name)
 {
     const char *system_command = NULL;
 
-    /*
-     * IMPORTANT:
-     * Only the five commands required by the assignment
-     * are permitted.
-     */
 
-    if (strcmp(exec_name, "DATE") == 0)
+    if (strcmp(exec_name,
+               "DATE") == 0)
     {
         system_command = "date";
     }
-    else if (strcmp(exec_name, "UPTIME") == 0)
+
+    else if (strcmp(exec_name,
+                    "UPTIME") == 0)
     {
         system_command = "uptime";
     }
-    else if (strcmp(exec_name, "DISKFREE") == 0)
+
+    else if (strcmp(exec_name,
+                    "DISKFREE") == 0)
     {
         system_command = "df -h";
     }
-    else if (strcmp(exec_name, "HOSTNAME") == 0)
+
+    else if (strcmp(exec_name,
+                    "HOSTNAME") == 0)
     {
         system_command = "hostname";
     }
-    else if (strcmp(exec_name, "WHOAMI") == 0)
+
+    else if (strcmp(exec_name,
+                    "WHOAMI") == 0)
     {
         system_command = "whoami";
     }
+
     else
     {
         const char *response =
@@ -253,11 +592,10 @@ void handle_exec(int client_fd, const char *exec_name)
     }
 
 
-    /*
-     * At this point the command has passed the whitelist.
-     */
+    FILE *fp =
+        popen(system_command,
+              "r");
 
-    FILE *fp = popen(system_command, "r");
 
     if (fp == NULL)
     {
@@ -274,11 +612,13 @@ void handle_exec(int client_fd, const char *exec_name)
 
     char response[BUFFER_SIZE];
 
+
     snprintf(response,
              sizeof(response),
              "OK EXEC %s SID:%s\n",
              exec_name,
              SID);
+
 
     send_all(client_fd,
              response,
@@ -286,6 +626,7 @@ void handle_exec(int client_fd, const char *exec_name)
 
 
     char line[BUFFER_SIZE];
+
 
     while (fgets(line,
                  sizeof(line),
@@ -306,20 +647,30 @@ void handle_exec(int client_fd, const char *exec_name)
              exec_name,
              SID);
 
+
     send_all(client_fd,
              response,
              strlen(response));
 }
 
 
+/* =========================================================
+   Main Agent
+   ========================================================= */
+
 int main(void)
 {
     int server_fd;
+
     int client_fd;
+
     int opt = 1;
 
+
     struct sockaddr_in server_addr;
+
     struct sockaddr_in client_addr;
+
 
     socklen_t client_len;
 
@@ -328,9 +679,11 @@ int main(void)
        STEP 1: Create TCP socket
        ===================================================== */
 
-    server_fd = socket(AF_INET,
-                       SOCK_STREAM,
-                       0);
+    server_fd =
+        socket(AF_INET,
+               SOCK_STREAM,
+               0);
+
 
     if (server_fd < 0)
     {
@@ -338,6 +691,7 @@ int main(void)
 
         return EXIT_FAILURE;
     }
+
 
     printf("TCP socket created successfully.\n");
 
@@ -368,10 +722,14 @@ int main(void)
            0,
            sizeof(server_addr));
 
-    server_addr.sin_family = AF_INET;
+
+    server_addr.sin_family =
+        AF_INET;
+
 
     server_addr.sin_addr.s_addr =
         htonl(INADDR_ANY);
+
 
     server_addr.sin_port =
         htons(PORT);
@@ -416,9 +774,11 @@ int main(void)
            PORT);
 
 
-    /* Prevent zombie child processes */
-
-    signal(SIGCHLD, SIG_IGN);
+    /*
+     * Prevent zombie child processes.
+     */
+    signal(SIGCHLD,
+           SIG_IGN);
 
 
     /* =====================================================
@@ -459,7 +819,8 @@ int main(void)
            STEP 7: Fork
            ================================================= */
 
-        pid_t pid = fork();
+        pid_t pid =
+            fork();
 
 
         if (pid < 0)
@@ -545,6 +906,7 @@ int main(void)
                 printf("[Child %d] Authentication successful.\n",
                        getpid());
             }
+
             else
             {
                 const char *response =
@@ -630,13 +992,74 @@ int main(void)
                                  "EXEC ",
                                  5) == 0)
                 {
-                    /*
-                     * Everything after "EXEC " is passed
-                     * to the whitelist checker.
-                     */
-
                     handle_exec(client_fd,
                                 buffer + 5);
+                }
+
+
+                /* =========================================
+                   PUT
+
+                   Expected command:
+                   PUT <filename> <filesize>
+                   ========================================= */
+
+                else if (strncmp(buffer,
+                                 "PUT ",
+                                 4) == 0)
+                {
+                    char filename[256];
+
+                    unsigned long long file_size_value;
+
+                    char extra;
+
+
+                    /*
+                     * Require exactly:
+                     *
+                     * filename
+                     * filesize
+                     *
+                     * The %c detects unexpected extra text.
+                     */
+                    int parsed =
+                        sscanf(buffer + 4,
+                               "%255s %llu %c",
+                               filename,
+                               &file_size_value,
+                               &extra);
+
+
+                    if (parsed != 2)
+                    {
+                        const char *response =
+                            "ERR INVALID_PUT_FORMAT SID:" SID "\n";
+
+
+                        send_all(client_fd,
+                                 response,
+                                 strlen(response));
+                    }
+
+                    else if (file_size_value >
+                             (unsigned long long)MAX_FILE_SIZE)
+                    {
+                        const char *response =
+                            "ERR 004 FILE_TOO_LARGE SID:" SID "\n";
+
+
+                        send_all(client_fd,
+                                 response,
+                                 strlen(response));
+                    }
+
+                    else
+                    {
+                        handle_put(client_fd,
+                                   filename,
+                                   (size_t)file_size_value);
+                    }
                 }
 
 
@@ -666,6 +1089,7 @@ int main(void)
 
             exit(EXIT_SUCCESS);
         }
+
         else
         {
             /* =============================================
