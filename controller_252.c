@@ -16,12 +16,10 @@
 #define BUFFER_SIZE 1024
 
 
-/*
- * Receive one complete newline-terminated line.
- *
- * TCP is a byte stream, therefore a complete response
- * may arrive through multiple recv() calls.
- */
+/* =========================================================
+   Receive one newline-terminated line
+   ========================================================= */
+
 ssize_t recv_line(int sockfd, char *buffer, size_t size)
 {
     size_t total = 0;
@@ -64,14 +62,102 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
 
         if (ch != '\r')
         {
-            buffer[total] = ch;
-            total++;
+            buffer[total++] = ch;
         }
     }
 
     buffer[total] = '\0';
 
     return (ssize_t)total;
+}
+
+
+/* =========================================================
+   Send all bytes
+   ========================================================= */
+
+int send_all(int sockfd, const char *data, size_t length)
+{
+    size_t total_sent = 0;
+
+    while (total_sent < length)
+    {
+        ssize_t n = send(sockfd,
+                         data + total_sent,
+                         length - total_sent,
+                         0);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -1;
+        }
+
+        if (n == 0)
+        {
+            return -1;
+        }
+
+        total_sent += (size_t)n;
+    }
+
+    return 0;
+}
+
+
+/* =========================================================
+   Receive multi-line response
+   ========================================================= */
+
+int receive_command_response(int sockfd,
+                             const char *end_marker)
+{
+    char buffer[BUFFER_SIZE];
+
+    while (1)
+    {
+        ssize_t n =
+            recv_line(sockfd,
+                      buffer,
+                      sizeof(buffer));
+
+        if (n == 0)
+        {
+            printf("Agent closed the connection.\n");
+            return -1;
+        }
+
+        if (n < 0)
+        {
+            perror("recv");
+            return -1;
+        }
+
+        printf("%s\n", buffer);
+
+        /*
+         * Stop reading when the expected END marker
+         * is received.
+         */
+        if (strcmp(buffer, end_marker) == 0)
+        {
+            break;
+        }
+
+        /*
+         * Also stop if Agent returned an error.
+         */
+        if (strncmp(buffer, "ERR ", 4) == 0)
+        {
+            break;
+        }
+    }
+
+    return 0;
 }
 
 
@@ -87,7 +173,7 @@ int main(int argc, char *argv[])
 
 
     /* =====================================================
-       STEP 1: Check command-line argument
+       STEP 1: Check Agent IP argument
        ===================================================== */
 
     if (argc != 2)
@@ -104,7 +190,9 @@ int main(int argc, char *argv[])
        STEP 2: Create TCP socket
        ===================================================== */
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockfd = socket(AF_INET,
+                    SOCK_STREAM,
+                    0);
 
     if (sockfd < 0)
     {
@@ -113,6 +201,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+
     printf("Controller TCP socket created successfully.\n");
 
 
@@ -120,17 +209,15 @@ int main(int argc, char *argv[])
        STEP 3: Prepare Agent address
        ===================================================== */
 
-    memset(&agent_addr, 0, sizeof(agent_addr));
+    memset(&agent_addr,
+           0,
+           sizeof(agent_addr));
 
     agent_addr.sin_family = AF_INET;
 
     agent_addr.sin_port = htons(PORT);
 
 
-    /*
-     * Convert Agent IPv4 address from text format
-     * into binary network format.
-     */
     if (inet_pton(AF_INET,
                   argv[1],
                   &agent_addr.sin_addr) <= 0)
@@ -170,17 +257,16 @@ int main(int argc, char *argv[])
 
 
     /* =====================================================
-       STEP 5: Send AUTH as first protocol command
+       STEP 5: Send AUTH
        ===================================================== */
 
     const char *auth_command =
         "AUTH " AUTH_TOKEN "\n";
 
 
-    if (send(sockfd,
-             auth_command,
-             strlen(auth_command),
-             0) < 0)
+    if (send_all(sockfd,
+                 auth_command,
+                 strlen(auth_command)) < 0)
     {
         perror("send");
 
@@ -194,28 +280,19 @@ int main(int argc, char *argv[])
 
 
     /* =====================================================
-       STEP 6: Receive Agent AUTH response
+       STEP 6: Receive AUTH response
        ===================================================== */
 
-    bytes_received = recv_line(sockfd,
-                               buffer,
-                               sizeof(buffer));
+    bytes_received =
+        recv_line(sockfd,
+                  buffer,
+                  sizeof(buffer));
 
 
-    if (bytes_received == 0)
+    if (bytes_received <= 0)
     {
         fprintf(stderr,
-                "Agent closed connection without a response.\n");
-
-        close(sockfd);
-
-        return EXIT_FAILURE;
-    }
-
-
-    if (bytes_received < 0)
-    {
-        perror("recv");
+                "Failed to receive AUTH response.\n");
 
         close(sockfd);
 
@@ -227,21 +304,11 @@ int main(int argc, char *argv[])
            buffer);
 
 
-    /* =====================================================
-       STEP 7: Check authentication result
-       ===================================================== */
-
     if (strcmp(buffer,
-               "OK AUTHENTICATED SID:" SID) == 0)
-    {
-        printf("Authentication successful.\n");
-        printf("RemoteOps session SID: %s\n",
-               SID);
-    }
-    else
+               "OK AUTHENTICATED SID:" SID) != 0)
     {
         fprintf(stderr,
-                "Authentication failed or unexpected response.\n");
+                "Authentication failed.\n");
 
         close(sockfd);
 
@@ -249,13 +316,173 @@ int main(int argc, char *argv[])
     }
 
 
+    printf("Authentication successful.\n");
+    printf("RemoteOps session SID: %s\n\n",
+           SID);
+
+
     /* =====================================================
-       STEP 8: Close connection
+       STEP 7: Interactive authenticated command loop
+       ===================================================== */
+
+    while (1)
+    {
+        printf("RemoteOps> ");
+
+        fflush(stdout);
+
+
+        if (fgets(buffer,
+                  sizeof(buffer),
+                  stdin) == NULL)
+        {
+            printf("\nInput closed.\n");
+            break;
+        }
+
+
+        /*
+         * Remove newline typed by user.
+         */
+        buffer[strcspn(buffer, "\r\n")] = '\0';
+
+
+        /*
+         * Ignore empty commands.
+         */
+        if (strlen(buffer) == 0)
+        {
+            continue;
+        }
+
+
+        /* ================================================
+           SYSINFO
+           ================================================ */
+
+        if (strcmp(buffer,
+                   "SYSINFO") == 0)
+        {
+            const char *command =
+                "SYSINFO\n";
+
+
+            if (send_all(sockfd,
+                         command,
+                         strlen(command)) < 0)
+            {
+                perror("send");
+                break;
+            }
+
+
+            if (receive_command_response(
+                    sockfd,
+                    "END SYSINFO SID:" SID) < 0)
+            {
+                break;
+            }
+        }
+
+
+        /* ================================================
+           LISTPROC
+           ================================================ */
+
+        else if (strcmp(buffer,
+                        "LISTPROC") == 0)
+        {
+            const char *command =
+                "LISTPROC\n";
+
+
+            if (send_all(sockfd,
+                         command,
+                         strlen(command)) < 0)
+            {
+                perror("send");
+                break;
+            }
+
+
+            if (receive_command_response(
+                    sockfd,
+                    "END LISTPROC SID:" SID) < 0)
+            {
+                break;
+            }
+        }
+
+
+        /* ================================================
+           Temporary local exit
+           ================================================ */
+
+        else if (strcmp(buffer,
+                        "EXIT") == 0)
+        {
+            /*
+             * Proper protocol QUIT will be implemented
+             * in a later part.
+             */
+            printf("Closing Controller.\n");
+
+            break;
+        }
+
+
+        /* ================================================
+           Other commands
+           ================================================ */
+
+        else
+        {
+            char command[BUFFER_SIZE + 2];
+
+
+            snprintf(command,
+                     sizeof(command),
+                     "%s\n",
+                     buffer);
+
+
+            if (send_all(sockfd,
+                         command,
+                         strlen(command)) < 0)
+            {
+                perror("send");
+                break;
+            }
+
+
+            bytes_received =
+                recv_line(sockfd,
+                          buffer,
+                          sizeof(buffer));
+
+
+            if (bytes_received <= 0)
+            {
+                printf("Agent disconnected.\n");
+                break;
+            }
+
+
+            printf("%s\n",
+                   buffer);
+        }
+    }
+
+
+    /* =====================================================
+       STEP 8: Close Controller socket
        ===================================================== */
 
     close(sockfd);
 
+
     printf("Controller connection closed.\n");
+
 
     return EXIT_SUCCESS;
 }

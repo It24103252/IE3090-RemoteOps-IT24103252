@@ -10,7 +10,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Personalized RemoteOps values */
 #define PORT 9410
 #define BACKLOG 10
 #define AUTH_TOKEN "OPS-3252"
@@ -18,18 +17,10 @@
 #define BUFFER_SIZE 1024
 
 
-/*
- * Receive exactly one newline-terminated protocol line.
- *
- * TCP is a byte stream, so one recv() call is not guaranteed
- * to contain one complete command.
- *
- * This function keeps receiving bytes until:
- *   1. '\n' is received,
- *   2. the connection closes,
- *   3. an error occurs, or
- *   4. the buffer becomes full.
- */
+/* =========================================================
+   Receive one newline-terminated protocol line
+   ========================================================= */
+
 ssize_t recv_line(int sockfd, char *buffer, size_t size)
 {
     size_t total = 0;
@@ -47,7 +38,6 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
 
         if (n == 0)
         {
-            /* Peer closed the connection */
             if (total == 0)
             {
                 return 0;
@@ -71,27 +61,166 @@ ssize_t recv_line(int sockfd, char *buffer, size_t size)
             break;
         }
 
-        /*
-         * Ignore carriage return so both:
-         *
-         * \n
-         *
-         * and
-         *
-         * \r\n
-         *
-         * are accepted.
-         */
         if (ch != '\r')
         {
-            buffer[total] = ch;
-            total++;
+            buffer[total++] = ch;
         }
     }
 
     buffer[total] = '\0';
 
     return (ssize_t)total;
+}
+
+
+/* =========================================================
+   Send all bytes
+   ========================================================= */
+
+int send_all(int sockfd, const char *data, size_t length)
+{
+    size_t total_sent = 0;
+
+    while (total_sent < length)
+    {
+        ssize_t n = send(sockfd,
+                         data + total_sent,
+                         length - total_sent,
+                         0);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -1;
+        }
+
+        if (n == 0)
+        {
+            return -1;
+        }
+
+        total_sent += (size_t)n;
+    }
+
+    return 0;
+}
+
+
+/* =========================================================
+   Send SYSINFO
+   ========================================================= */
+
+void handle_sysinfo(int client_fd)
+{
+    FILE *fp;
+    char line[BUFFER_SIZE];
+
+    /*
+     * uname provides useful Linux system information.
+     */
+    fp = popen("uname -a", "r");
+
+    if (fp == NULL)
+    {
+        const char *error_response =
+            "ERR SYSINFO_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    /*
+     * Send a clear start marker.
+     */
+    const char *start =
+        "OK SYSINFO SID:" SID "\n";
+
+    send_all(client_fd,
+             start,
+             strlen(start));
+
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        send_all(client_fd,
+                 line,
+                 strlen(line));
+    }
+
+    pclose(fp);
+
+
+    /*
+     * End marker tells Controller that SYSINFO output
+     * has finished.
+     */
+    const char *end =
+        "END SYSINFO SID:" SID "\n";
+
+    send_all(client_fd,
+             end,
+             strlen(end));
+}
+
+
+/* =========================================================
+   Send process list
+   ========================================================= */
+
+void handle_listproc(int client_fd)
+{
+    FILE *fp;
+    char line[BUFFER_SIZE];
+
+    /*
+     * ps displays currently running processes.
+     */
+    fp = popen("ps -eo pid,comm", "r");
+
+    if (fp == NULL)
+    {
+        const char *error_response =
+            "ERR LISTPROC_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    const char *start =
+        "OK LISTPROC SID:" SID "\n";
+
+    send_all(client_fd,
+             start,
+             strlen(start));
+
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        send_all(client_fd,
+                 line,
+                 strlen(line));
+    }
+
+    pclose(fp);
+
+
+    const char *end =
+        "END LISTPROC SID:" SID "\n";
+
+    send_all(client_fd,
+             end,
+             strlen(end));
 }
 
 
@@ -141,7 +270,7 @@ int main(void)
 
 
     /* =====================================================
-       STEP 3: Prepare server address
+       STEP 3: Prepare Agent address
        ===================================================== */
 
     memset(&server_addr, 0, sizeof(server_addr));
@@ -154,7 +283,7 @@ int main(void)
 
 
     /* =====================================================
-       STEP 4: Bind to personalized port 9410
+       STEP 4: Bind
        ===================================================== */
 
     if (bind(server_fd,
@@ -168,11 +297,12 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    printf("Agent bound to TCP port %d.\n", PORT);
+    printf("Agent bound to TCP port %d.\n",
+           PORT);
 
 
     /* =====================================================
-       STEP 5: Listen for Controller connections
+       STEP 5: Listen
        ===================================================== */
 
     if (listen(server_fd, BACKLOG) < 0)
@@ -184,28 +314,29 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+
     printf("RemoteOps Agent listening on port %d...\n",
            PORT);
 
 
-    /* =====================================================
-       STEP 6: Prevent zombie child processes
-       ===================================================== */
+    /* Prevent zombie children */
 
     signal(SIGCHLD, SIG_IGN);
 
 
     /* =====================================================
-       STEP 7: Continuously accept Controllers
+       STEP 6: Accept Controllers continuously
        ===================================================== */
 
     while (1)
     {
         client_len = sizeof(client_addr);
 
+
         client_fd = accept(server_fd,
                            (struct sockaddr *)&client_addr,
                            &client_len);
+
 
         if (client_fd < 0)
         {
@@ -226,7 +357,7 @@ int main(void)
 
 
         /* =================================================
-           STEP 8: Create child for this Controller
+           STEP 7: Fork child
            ================================================= */
 
         pid_t pid = fork();
@@ -249,13 +380,12 @@ int main(void)
                ============================================= */
 
             char buffer[BUFFER_SIZE];
+
             ssize_t bytes_received;
 
+            int authenticated = 0;
 
-            /*
-             * Child handles this Controller.
-             * It does not accept new Controllers.
-             */
+
             close(server_fd);
 
 
@@ -266,15 +396,16 @@ int main(void)
 
 
             /* =============================================
-               STEP 9: Receive first complete protocol line
+               STEP 8: AUTH must be first
                ============================================= */
 
-            bytes_received = recv_line(client_fd,
-                                       buffer,
-                                       sizeof(buffer));
+            bytes_received =
+                recv_line(client_fd,
+                          buffer,
+                          sizeof(buffer));
 
 
-            if (bytes_received == 0)
+            if (bytes_received <= 0)
             {
                 printf("[Child %d] Controller disconnected before AUTH.\n",
                        getpid());
@@ -285,43 +416,35 @@ int main(void)
             }
 
 
-            if (bytes_received < 0)
-            {
-                perror("recv");
-
-                close(client_fd);
-
-                exit(EXIT_FAILURE);
-            }
-
-
             printf("[Child %d] Received: %s\n",
                    getpid(),
                    buffer);
 
 
-            /* =============================================
-               STEP 10: AUTH must be first command
-               ============================================= */
-
-            if (strcmp(buffer, "AUTH " AUTH_TOKEN) == 0)
+            if (strcmp(buffer,
+                       "AUTH " AUTH_TOKEN) == 0)
             {
                 const char *response =
                     "OK AUTHENTICATED SID:" SID "\n";
 
 
-                if (send(client_fd,
-                         response,
-                         strlen(response),
-                         0) < 0)
+                if (send_all(client_fd,
+                             response,
+                             strlen(response)) < 0)
                 {
                     perror("send");
+
+                    close(client_fd);
+
+                    exit(EXIT_FAILURE);
                 }
-                else
-                {
-                    printf("[Child %d] Authentication successful.\n",
-                           getpid());
-                }
+
+
+                authenticated = 1;
+
+
+                printf("[Child %d] Authentication successful.\n",
+                       getpid());
             }
             else
             {
@@ -329,31 +452,100 @@ int main(void)
                     "ERR 001 AUTH_FAILED SID:" SID "\n";
 
 
-                if (send(client_fd,
+                send_all(client_fd,
                          response,
-                         strlen(response),
-                         0) < 0)
-                {
-                    perror("send");
-                }
-                else
-                {
-                    printf("[Child %d] Authentication failed.\n",
-                           getpid());
-                }
+                         strlen(response));
+
+
+                printf("[Child %d] Authentication failed.\n",
+                       getpid());
+
+
+                close(client_fd);
+
+                exit(EXIT_SUCCESS);
             }
 
 
             /* =============================================
-               STEP 11: Close Controller session
+               STEP 9: Authenticated command loop
                ============================================= */
 
+            while (authenticated)
+            {
+                bytes_received =
+                    recv_line(client_fd,
+                              buffer,
+                              sizeof(buffer));
+
+
+                if (bytes_received == 0)
+                {
+                    printf("[Child %d] Controller disconnected.\n",
+                           getpid());
+
+                    break;
+                }
+
+
+                if (bytes_received < 0)
+                {
+                    perror("recv");
+
+                    break;
+                }
+
+
+                printf("[Child %d] Command: %s\n",
+                       getpid(),
+                       buffer);
+
+
+                /* =========================================
+                   SYSINFO
+                   ========================================= */
+
+                if (strcmp(buffer,
+                           "SYSINFO") == 0)
+                {
+                    handle_sysinfo(client_fd);
+                }
+
+
+                /* =========================================
+                   LISTPROC
+                   ========================================= */
+
+                else if (strcmp(buffer,
+                                "LISTPROC") == 0)
+                {
+                    handle_listproc(client_fd);
+                }
+
+
+                /* =========================================
+                   Unknown command
+                   ========================================= */
+
+                else
+                {
+                    const char *response =
+                        "ERR UNKNOWN_COMMAND SID:" SID "\n";
+
+
+                    if (send_all(client_fd,
+                                 response,
+                                 strlen(response)) < 0)
+                    {
+                        perror("send");
+
+                        break;
+                    }
+                }
+            }
+
+
             close(client_fd);
-
-
-            printf("[Child %d] Controller disconnected.\n",
-                   getpid());
-
 
             exit(EXIT_SUCCESS);
         }
@@ -363,19 +555,11 @@ int main(void)
                PARENT PROCESS
                ============================================= */
 
-            /*
-             * Child owns this Controller connection.
-             * Parent closes its copy and returns to accept().
-             */
             close(client_fd);
         }
     }
 
 
-    /*
-     * Normally unreachable because while(1)
-     * keeps the Agent running.
-     */
     close(server_fd);
 
     return EXIT_SUCCESS;
