@@ -8,6 +8,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -25,6 +27,25 @@
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
 #define STORAGE_DIR "./agentfiles/IT24103252"
+
+/*
+ * Part 10:
+ * Send one UDP monitoring update every 5 seconds.
+ */
+#define MONITOR_INTERVAL 5
+
+
+/* =========================================================
+   System statistics structure
+   ========================================================= */
+
+typedef struct
+{
+    double cpu_load;
+    unsigned long mem_used_mb;
+    unsigned long uptime_sec;
+
+} SystemStats;
 
 
 /* =========================================================
@@ -46,7 +67,11 @@ ssize_t recv_line(int sockfd,
     {
         char ch;
 
-        ssize_t n = recv(sockfd, &ch, 1, 0);
+        ssize_t n =
+            recv(sockfd,
+                 &ch,
+                 1,
+                 0);
 
         if (n == 0)
         {
@@ -97,10 +122,11 @@ int send_all(int sockfd,
 
     while (total_sent < length)
     {
-        ssize_t n = send(sockfd,
-                         data + total_sent,
-                         length - total_sent,
-                         0);
+        ssize_t n =
+            send(sockfd,
+                 data + total_sent,
+                 length - total_sent,
+                 0);
 
         if (n < 0)
         {
@@ -146,10 +172,11 @@ int receive_file_bytes(int sockfd,
             ? remaining
             : sizeof(buffer);
 
-        ssize_t n = recv(sockfd,
-                         buffer,
-                         chunk_size,
-                         0);
+        ssize_t n =
+            recv(sockfd,
+                 buffer,
+                 chunk_size,
+                 0);
 
         if (n == 0)
         {
@@ -404,10 +431,6 @@ void handle_get(int client_fd,
     struct stat file_info;
 
 
-    /* -----------------------------------------------------
-       1. Validate filename
-       ----------------------------------------------------- */
-
     if (!valid_filename(filename))
     {
         const char *error_response =
@@ -420,10 +443,6 @@ void handle_get(int client_fd,
         return;
     }
 
-
-    /* -----------------------------------------------------
-       2. Build personalized storage path
-       ----------------------------------------------------- */
 
     int path_length =
         snprintf(filepath,
@@ -445,10 +464,6 @@ void handle_get(int client_fd,
         return;
     }
 
-
-    /* -----------------------------------------------------
-       3. Check file exists and get exact size
-       ----------------------------------------------------- */
 
     if (stat(filepath,
              &file_info) < 0)
@@ -494,10 +509,6 @@ void handle_get(int client_fd,
         (size_t)file_info.st_size;
 
 
-    /* -----------------------------------------------------
-       4. Open file in binary-read mode
-       ----------------------------------------------------- */
-
     FILE *file =
         fopen(filepath, "rb");
 
@@ -513,10 +524,6 @@ void handle_get(int client_fd,
         return;
     }
 
-
-    /* -----------------------------------------------------
-       5. Send GET response header containing filesize
-       ----------------------------------------------------- */
 
     int response_length =
         snprintf(response,
@@ -551,10 +558,6 @@ void handle_get(int client_fd,
            filesize);
 
 
-    /* -----------------------------------------------------
-       6. Send exactly filesize raw bytes
-       ----------------------------------------------------- */
-
     if (send_file_bytes(client_fd,
                         file,
                         filesize) < 0)
@@ -580,52 +583,269 @@ void handle_get(int client_fd,
 
 
 /* =========================================================
+   Part 10: Read Linux system statistics
+   ========================================================= */
+
+int get_system_stats(SystemStats *stats)
+{
+    FILE *file;
+
+    double load = 0.0;
+    double uptime = 0.0;
+
+    unsigned long mem_total_kb = 0;
+    unsigned long mem_available_kb = 0;
+
+    char line[256];
+
+
+    if (stats == NULL)
+    {
+        return -1;
+    }
+
+
+    /* CPU load */
+
+    file =
+        fopen("/proc/loadavg", "r");
+
+    if (file == NULL)
+    {
+        return -1;
+    }
+
+
+    if (fscanf(file,
+               "%lf",
+               &load) != 1)
+    {
+        fclose(file);
+
+        return -1;
+    }
+
+
+    fclose(file);
+
+
+    /* Memory information */
+
+    file =
+        fopen("/proc/meminfo", "r");
+
+    if (file == NULL)
+    {
+        return -1;
+    }
+
+
+    while (fgets(line,
+                 sizeof(line),
+                 file) != NULL)
+    {
+        if (sscanf(line,
+                   "MemTotal: %lu kB",
+                   &mem_total_kb) == 1)
+        {
+            continue;
+        }
+
+
+        if (sscanf(line,
+                   "MemAvailable: %lu kB",
+                   &mem_available_kb) == 1)
+        {
+            continue;
+        }
+    }
+
+
+    fclose(file);
+
+
+    if (mem_total_kb == 0 ||
+        mem_available_kb > mem_total_kb)
+    {
+        return -1;
+    }
+
+
+    /* Uptime */
+
+    file =
+        fopen("/proc/uptime", "r");
+
+    if (file == NULL)
+    {
+        return -1;
+    }
+
+
+    if (fscanf(file,
+               "%lf",
+               &uptime) != 1)
+    {
+        fclose(file);
+
+        return -1;
+    }
+
+
+    fclose(file);
+
+
+    stats->cpu_load =
+        load;
+
+
+    stats->mem_used_mb =
+        (mem_total_kb -
+         mem_available_kb) / 1024;
+
+
+    stats->uptime_sec =
+        (unsigned long)uptime;
+
+
+    return 0;
+}
+
+
+/* =========================================================
    SYSINFO
    ========================================================= */
 
 void handle_sysinfo(int client_fd)
 {
-    FILE *fp;
-    char line[BUFFER_SIZE];
+    SystemStats stats;
 
-    fp = popen("uname -a", "r");
+    char response[BUFFER_SIZE];
 
-    if (fp == NULL)
+
+    if (get_system_stats(&stats) < 0)
     {
-        const char *response =
+        const char *error_response =
             "ERR SYSINFO_FAILED SID:" SID "\n";
 
+
         send_all(client_fd,
-                 response,
-                 strlen(response));
+                 error_response,
+                 strlen(error_response));
 
         return;
     }
 
-    const char *start =
-        "OK SYSINFO SID:" SID "\n";
 
-    send_all(client_fd,
-             start,
-             strlen(start));
+    int response_length =
+        snprintf(response,
+                 sizeof(response),
+                 "OK SYSINFO %.2f %lu %lu SID:%s\n",
+                 stats.cpu_load,
+                 stats.mem_used_mb,
+                 stats.uptime_sec,
+                 SID);
 
-    while (fgets(line,
-                 sizeof(line),
-                 fp) != NULL)
+
+    if (response_length < 0 ||
+        (size_t)response_length >= sizeof(response))
     {
-        send_all(client_fd,
-                 line,
-                 strlen(line));
+        return;
     }
 
-    pclose(fp);
-
-    const char *end =
-        "END SYSINFO SID:" SID "\n";
 
     send_all(client_fd,
-             end,
-             strlen(end));
+             response,
+             (size_t)response_length);
+}
+
+
+/* =========================================================
+   Part 10: UDP periodic monitoring sender
+   ========================================================= */
+
+void run_udp_monitor(struct in_addr controller_ip,
+                     int udp_port)
+{
+    int udp_fd;
+
+    struct sockaddr_in udp_addr;
+
+    char message[BUFFER_SIZE];
+
+
+    udp_fd =
+        socket(AF_INET,
+               SOCK_DGRAM,
+               0);
+
+
+    if (udp_fd < 0)
+    {
+        perror("UDP socket");
+
+        exit(EXIT_FAILURE);
+    }
+
+
+    memset(&udp_addr,
+           0,
+           sizeof(udp_addr));
+
+
+    udp_addr.sin_family =
+        AF_INET;
+
+
+    udp_addr.sin_addr =
+        controller_ip;
+
+
+    udp_addr.sin_port =
+        htons((unsigned short)udp_port);
+
+
+    printf("[Monitor %d] UDP monitoring started to %s:%d\n",
+           getpid(),
+           inet_ntoa(controller_ip),
+           udp_port);
+
+
+    while (1)
+    {
+        SystemStats stats;
+
+
+        if (get_system_stats(&stats) == 0)
+        {
+            int message_length =
+                snprintf(message,
+                         sizeof(message),
+                         "SYSINFO %.2f %lu %lu SID:%s",
+                         stats.cpu_load,
+                         stats.mem_used_mb,
+                         stats.uptime_sec,
+                         SID);
+
+
+            if (message_length > 0 &&
+                (size_t)message_length < sizeof(message))
+            {
+                if (sendto(udp_fd,
+                           message,
+                           (size_t)message_length,
+                           0,
+                           (struct sockaddr *)&udp_addr,
+                           sizeof(udp_addr)) < 0)
+                {
+                    perror("UDP sendto");
+                }
+            }
+        }
+
+
+        sleep(MONITOR_INTERVAL);
+    }
 }
 
 
@@ -638,7 +858,8 @@ void handle_listproc(int client_fd)
     FILE *fp;
     char line[BUFFER_SIZE];
 
-    fp = popen("ps -eo pid,comm", "r");
+    fp =
+        popen("ps -eo pid,comm", "r");
 
     if (fp == NULL)
     {
@@ -688,26 +909,36 @@ void handle_exec(int client_fd,
 {
     const char *system_command = NULL;
 
-    if (strcmp(exec_name, "DATE") == 0)
+    if (strcmp(exec_name,
+               "DATE") == 0)
     {
         system_command = "date";
     }
-    else if (strcmp(exec_name, "UPTIME") == 0)
+
+    else if (strcmp(exec_name,
+                    "UPTIME") == 0)
     {
         system_command = "uptime";
     }
-    else if (strcmp(exec_name, "DISKFREE") == 0)
+
+    else if (strcmp(exec_name,
+                    "DISKFREE") == 0)
     {
         system_command = "df -h";
     }
-    else if (strcmp(exec_name, "HOSTNAME") == 0)
+
+    else if (strcmp(exec_name,
+                    "HOSTNAME") == 0)
     {
         system_command = "hostname";
     }
-    else if (strcmp(exec_name, "WHOAMI") == 0)
+
+    else if (strcmp(exec_name,
+                    "WHOAMI") == 0)
     {
         system_command = "whoami";
     }
+
     else
     {
         const char *response =
@@ -720,8 +951,10 @@ void handle_exec(int client_fd,
         return;
     }
 
+
     FILE *fp =
         popen(system_command, "r");
+
 
     if (fp == NULL)
     {
@@ -735,7 +968,9 @@ void handle_exec(int client_fd,
         return;
     }
 
+
     char response[BUFFER_SIZE];
+
 
     snprintf(response,
              sizeof(response),
@@ -743,11 +978,14 @@ void handle_exec(int client_fd,
              exec_name,
              SID);
 
+
     send_all(client_fd,
              response,
              strlen(response));
 
+
     char line[BUFFER_SIZE];
+
 
     while (fgets(line,
                  sizeof(line),
@@ -758,13 +996,16 @@ void handle_exec(int client_fd,
                  strlen(line));
     }
 
+
     pclose(fp);
+
 
     snprintf(response,
              sizeof(response),
              "END EXEC %s SID:%s\n",
              exec_name,
              SID);
+
 
     send_all(client_fd,
              response,
@@ -793,11 +1034,14 @@ int main(void)
                SOCK_STREAM,
                0);
 
+
     if (server_fd < 0)
     {
         perror("socket");
+
         return EXIT_FAILURE;
     }
+
 
     printf("TCP socket created successfully.\n");
 
@@ -820,11 +1064,14 @@ int main(void)
            0,
            sizeof(server_addr));
 
+
     server_addr.sin_family =
         AF_INET;
 
+
     server_addr.sin_addr.s_addr =
         htonl(INADDR_ANY);
+
 
     server_addr.sin_port =
         htons(PORT);
@@ -841,6 +1088,7 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+
     printf("Agent bound to TCP port %d.\n",
            PORT);
 
@@ -855,10 +1103,15 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+
     printf("RemoteOps Agent listening on port %d...\n",
            PORT);
 
 
+    /*
+     * Prevent completed Controller child processes
+     * from remaining as zombies.
+     */
     signal(SIGCHLD,
            SIG_IGN);
 
@@ -868,10 +1121,12 @@ int main(void)
         client_len =
             sizeof(client_addr);
 
+
         client_fd =
             accept(server_fd,
                    (struct sockaddr *)&client_addr,
                    &client_len);
+
 
         if (client_fd < 0)
         {
@@ -879,6 +1134,7 @@ int main(void)
             {
                 continue;
             }
+
 
             perror("accept");
 
@@ -905,6 +1161,10 @@ int main(void)
         }
 
 
+        /* =================================================
+           Controller session child
+           ================================================= */
+
         if (pid == 0)
         {
             char buffer[BUFFER_SIZE];
@@ -913,6 +1173,20 @@ int main(void)
 
             int authenticated = 0;
 
+
+            /*
+             * Part 10:
+             *
+             * -1 means UDP monitoring is currently OFF
+             * for this Controller session.
+             */
+            
+            
+            
+            
+            
+            pid_t monitor_pid = -1;
+            signal(SIGCHLD,SIG_DFL);
 
             close(server_fd);
 
@@ -1021,7 +1295,9 @@ int main(void)
                        buffer);
 
 
-                /* SYSINFO */
+                /* =================================================
+                   SYSINFO
+                   ================================================= */
 
                 if (strcmp(buffer,
                            "SYSINFO") == 0)
@@ -1030,7 +1306,9 @@ int main(void)
                 }
 
 
-                /* LISTPROC */
+                /* =================================================
+                   LISTPROC
+                   ================================================= */
 
                 else if (strcmp(buffer,
                                 "LISTPROC") == 0)
@@ -1039,7 +1317,9 @@ int main(void)
                 }
 
 
-                /* EXEC */
+                /* =================================================
+                   EXEC
+                   ================================================= */
 
                 else if (strncmp(buffer,
                                  "EXEC ",
@@ -1050,7 +1330,9 @@ int main(void)
                 }
 
 
-                /* PUT */
+                /* =================================================
+                   PUT
+                   ================================================= */
 
                 else if (strncmp(buffer,
                                  "PUT ",
@@ -1119,9 +1401,6 @@ int main(void)
                     char extra;
 
 
-                    /*
-                     * Require exactly one filename.
-                     */
                     int parsed =
                         sscanf(buffer + 4,
                                "%255s %c",
@@ -1148,7 +1427,193 @@ int main(void)
                 }
 
 
-                /* Unknown */
+                /* =================================================
+                   Part 10: MONITOR START <udp_port>
+
+                   Example:
+                   MONITOR START 9500
+                   ================================================= */
+
+                else if (strncmp(buffer,
+                                 "MONITOR START ",
+                                 14) == 0)
+                {
+                    int udp_port;
+
+                    char extra;
+
+
+                    int parsed =
+                        sscanf(buffer + 14,
+                               "%d %c",
+                               &udp_port,
+                               &extra);
+
+
+                    /*
+                     * Check for exactly one valid UDP port.
+                     */
+                    if (parsed != 1 ||
+                        udp_port < 1 ||
+                        udp_port > 65535)
+                    {
+                        const char *response =
+                            "ERR INVALID_UDP_PORT SID:" SID "\n";
+
+
+                        send_all(client_fd,
+                                 response,
+                                 strlen(response));
+                    }
+
+
+                    /*
+                     * Prevent two monitors from being started
+                     * for the same Controller session.
+                     */
+                    else if (monitor_pid > 0)
+                    {
+                        const char *response =
+                            "ERR MONITOR_ALREADY_RUNNING SID:" SID "\n";
+
+
+                        send_all(client_fd,
+                                 response,
+                                 strlen(response));
+                    }
+
+
+                    else
+                    {
+                        monitor_pid =
+                            fork();
+
+
+                        if (monitor_pid < 0)
+                        {
+                            perror("monitor fork");
+
+
+                            const char *response =
+                                "ERR MONITOR_START_FAILED SID:" SID "\n";
+
+
+                            send_all(client_fd,
+                                     response,
+                                     strlen(response));
+
+
+                            monitor_pid = -1;
+                        }
+
+
+                        /*
+                         * UDP monitoring child
+                         */
+                        else if (monitor_pid == 0)
+                        {
+                            /*
+                             * This child sends UDP only.
+                             * It does not need the TCP socket.
+                             */
+                            close(client_fd);
+
+
+                            run_udp_monitor(client_addr.sin_addr,
+                                            udp_port);
+
+
+                            exit(EXIT_SUCCESS);
+                        }
+
+
+                        /*
+                         * TCP Controller-session child
+                         */
+                        else
+                        {
+                            const char *response =
+                                "OK MONITOR_STARTED SID:" SID "\n";
+
+
+                            if (send_all(client_fd,
+                                         response,
+                                         strlen(response)) < 0)
+                            {
+                                kill(monitor_pid,
+                                     SIGTERM);
+
+
+                                waitpid(monitor_pid,
+                                        NULL,
+                                        0);
+
+
+                                monitor_pid = -1;
+
+                                break;
+                            }
+
+
+                            printf("[Child %d] UDP monitoring started "
+                                   "for Controller %s on UDP port %d "
+                                   "(monitor PID %d).\n",
+                                   getpid(),
+                                   inet_ntoa(client_addr.sin_addr),
+                                   udp_port,
+                                   monitor_pid);
+                        }
+                    }
+                }
+
+
+                /* =================================================
+                   Part 10: MONITOR STOP
+                   ================================================= */
+
+                else if (strcmp(buffer,
+                                "MONITOR STOP") == 0)
+                {
+                    if (monitor_pid > 0)
+                    {
+                        pid_t old_monitor_pid =
+                            monitor_pid;
+
+
+                        kill(monitor_pid,
+                             SIGTERM);
+
+
+                        waitpid(monitor_pid,
+                                NULL,
+                                0);
+
+
+                        monitor_pid = -1;
+
+
+                        printf("[Child %d] UDP monitor PID %d stopped.\n",
+                               getpid(),
+                               old_monitor_pid);
+                    }
+
+
+                    const char *response =
+                        "OK MONITOR_STOPPED SID:" SID "\n";
+
+
+                    if (send_all(client_fd,
+                                 response,
+                                 strlen(response)) < 0)
+                    {
+                        break;
+                    }
+                }
+
+
+                /* =================================================
+                   Unknown command
+                   ================================================= */
 
                 else
                 {
@@ -1166,10 +1631,36 @@ int main(void)
             }
 
 
+            /* =================================================
+               Part 10:
+               Clean up monitor if Controller disconnects
+               without sending MONITOR STOP.
+               ================================================= */
+
+            if (monitor_pid > 0)
+            {
+                kill(monitor_pid,
+                     SIGTERM);
+
+
+                waitpid(monitor_pid,
+                        NULL,
+                        0);
+
+
+                monitor_pid = -1;
+            }
+
+
             close(client_fd);
 
             exit(EXIT_SUCCESS);
         }
+
+
+        /* =================================================
+           Original Agent parent
+           ================================================= */
 
         else
         {
