@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <time.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -20,18 +21,18 @@
 
 #define PORT 9410
 #define BACKLOG 10
+
 #define AUTH_TOKEN "OPS-3252"
 #define SID "2523"
+
 #define BUFFER_SIZE 1024
 
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
 #define STORAGE_DIR "./agentfiles/IT24103252"
 
-/*
- * Part 10:
- * Send one UDP monitoring update every 5 seconds.
- */
+#define LOG_FILE "remoteops_IT24103252.log"
+
 #define MONITOR_INTERVAL 5
 
 
@@ -49,6 +50,61 @@ typedef struct
 
 
 /* =========================================================
+   Part 11 - Logging
+   ========================================================= */
+
+void write_log(const char *message)
+{
+    FILE *log_file;
+
+    time_t current_time;
+
+    struct tm time_info;
+
+    char timestamp[64];
+
+
+    current_time = time(NULL);
+
+
+    if (localtime_r(&current_time,
+                    &time_info) == NULL)
+    {
+        return;
+    }
+
+
+    if (strftime(timestamp,
+                 sizeof(timestamp),
+                 "%Y-%m-%d %H:%M:%S",
+                 &time_info) == 0)
+    {
+        return;
+    }
+
+
+    log_file = fopen(LOG_FILE, "a");
+
+
+    if (log_file == NULL)
+    {
+        perror("log fopen");
+
+        return;
+    }
+
+
+    fprintf(log_file,
+            "[%s] %s\n",
+            timestamp,
+            message);
+
+
+    fclose(log_file);
+}
+
+
+/* =========================================================
    Receive one newline-terminated protocol line
    ========================================================= */
 
@@ -58,20 +114,24 @@ ssize_t recv_line(int sockfd,
 {
     size_t total = 0;
 
+
     if (size == 0)
     {
         return -1;
     }
 
+
     while (total < size - 1)
     {
         char ch;
+
 
         ssize_t n =
             recv(sockfd,
                  &ch,
                  1,
                  0);
+
 
         if (n == 0)
         {
@@ -83,6 +143,7 @@ ssize_t recv_line(int sockfd,
             break;
         }
 
+
         if (n < 0)
         {
             if (errno == EINTR)
@@ -93,10 +154,12 @@ ssize_t recv_line(int sockfd,
             return -1;
         }
 
+
         if (ch == '\n')
         {
             break;
         }
+
 
         if (ch != '\r')
         {
@@ -104,7 +167,9 @@ ssize_t recv_line(int sockfd,
         }
     }
 
+
     buffer[total] = '\0';
+
 
     return (ssize_t)total;
 }
@@ -120,6 +185,7 @@ int send_all(int sockfd,
 {
     size_t total_sent = 0;
 
+
     while (total_sent < length)
     {
         ssize_t n =
@@ -127,6 +193,7 @@ int send_all(int sockfd,
                  data + total_sent,
                  length - total_sent,
                  0);
+
 
         if (n < 0)
         {
@@ -138,20 +205,23 @@ int send_all(int sockfd,
             return -1;
         }
 
+
         if (n == 0)
         {
             return -1;
         }
 
+
         total_sent += (size_t)n;
     }
+
 
     return 0;
 }
 
 
 /* =========================================================
-   PUT: Receive exactly filesize raw bytes
+   PUT - Receive exact raw bytes
    ========================================================= */
 
 int receive_file_bytes(int sockfd,
@@ -162,15 +232,18 @@ int receive_file_bytes(int sockfd,
 
     size_t total_received = 0;
 
+
     while (total_received < filesize)
     {
         size_t remaining =
             filesize - total_received;
 
+
         size_t chunk_size =
             remaining < sizeof(buffer)
             ? remaining
             : sizeof(buffer);
+
 
         ssize_t n =
             recv(sockfd,
@@ -178,10 +251,12 @@ int receive_file_bytes(int sockfd,
                  chunk_size,
                  0);
 
+
         if (n == 0)
         {
             return -1;
         }
+
 
         if (n < 0)
         {
@@ -193,26 +268,30 @@ int receive_file_bytes(int sockfd,
             return -1;
         }
 
+
         size_t written =
             fwrite(buffer,
                    1,
                    (size_t)n,
                    file);
 
+
         if (written != (size_t)n)
         {
             return -1;
         }
 
+
         total_received += (size_t)n;
     }
+
 
     return 0;
 }
 
 
 /* =========================================================
-   GET: Send exactly filesize raw bytes
+   GET - Send exact raw bytes
    ========================================================= */
 
 int send_file_bytes(int sockfd,
@@ -223,15 +302,18 @@ int send_file_bytes(int sockfd,
 
     size_t total_sent = 0;
 
+
     while (total_sent < filesize)
     {
         size_t remaining =
             filesize - total_sent;
 
+
         size_t chunk_size =
             remaining < sizeof(buffer)
             ? remaining
             : sizeof(buffer);
+
 
         size_t bytes_read =
             fread(buffer,
@@ -239,10 +321,12 @@ int send_file_bytes(int sockfd,
                   chunk_size,
                   file);
 
+
         if (bytes_read == 0)
         {
             return -1;
         }
+
 
         if (send_all(sockfd,
                      buffer,
@@ -251,8 +335,10 @@ int send_file_bytes(int sockfd,
             return -1;
         }
 
+
         total_sent += bytes_read;
     }
+
 
     return 0;
 }
@@ -270,23 +356,24 @@ int valid_filename(const char *filename)
         return 0;
     }
 
-    /*
-     * Prevent directory traversal.
-     */
+
     if (strstr(filename, "..") != NULL)
     {
         return 0;
     }
+
 
     if (strchr(filename, '/') != NULL)
     {
         return 0;
     }
 
+
     if (strchr(filename, '\\') != NULL)
     {
         return 0;
     }
+
 
     return 1;
 }
@@ -301,31 +388,39 @@ void handle_put(int client_fd,
                 size_t filesize)
 {
     char filepath[512];
+
     char response[BUFFER_SIZE];
+
 
     if (!valid_filename(filename))
     {
         const char *error_response =
             "ERR INVALID_FILENAME SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
+
 
     if (filesize > MAX_FILE_SIZE)
     {
         const char *error_response =
             "ERR 004 FILE_TOO_LARGE SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
+
 
     int path_length =
         snprintf(filepath,
@@ -334,40 +429,49 @@ void handle_put(int client_fd,
                  STORAGE_DIR,
                  filename);
 
+
     if (path_length < 0 ||
         (size_t)path_length >= sizeof(filepath))
     {
         const char *error_response =
             "ERR INVALID_FILENAME SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
 
-    FILE *file =
-        fopen(filepath, "wb");
+
+    FILE *file = fopen(filepath, "wb");
+
 
     if (file == NULL)
     {
         perror("fopen");
 
+
         const char *error_response =
             "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
 
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
+
 
     printf("[Child %d] Receiving file %s (%zu bytes)\n",
            getpid(),
            filename,
            filesize);
+
 
     if (receive_file_bytes(client_fd,
                            file,
@@ -377,29 +481,37 @@ void handle_put(int client_fd,
 
         remove(filepath);
 
+
         const char *error_response =
             "ERR FILE_RECEIVE_FAILED SID:" SID "\n";
+
 
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
+
 
     if (fclose(file) != 0)
     {
         remove(filepath);
 
+
         const char *error_response =
             "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
 
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
+
 
     snprintf(response,
              sizeof(response),
@@ -407,9 +519,11 @@ void handle_put(int client_fd,
              filename,
              SID);
 
+
     send_all(client_fd,
              response,
              strlen(response));
+
 
     printf("[Child %d] File received successfully: %s (%zu bytes)\n",
            getpid(),
@@ -426,6 +540,7 @@ void handle_get(int client_fd,
                 const char *filename)
 {
     char filepath[512];
+
     char response[BUFFER_SIZE];
 
     struct stat file_info;
@@ -436,9 +551,11 @@ void handle_get(int client_fd,
         const char *error_response =
             "ERR INVALID_FILENAME SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -451,15 +568,18 @@ void handle_get(int client_fd,
                  STORAGE_DIR,
                  filename);
 
+
     if (path_length < 0 ||
         (size_t)path_length >= sizeof(filepath))
     {
         const char *error_response =
             "ERR INVALID_FILENAME SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -471,9 +591,11 @@ void handle_get(int client_fd,
         const char *error_response =
             "ERR 005 FILE_NOT_FOUND SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -484,9 +606,11 @@ void handle_get(int client_fd,
         const char *error_response =
             "ERR 005 FILE_NOT_FOUND SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -497,9 +621,11 @@ void handle_get(int client_fd,
         const char *error_response =
             "ERR FILE_READ_FAILED SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -509,17 +635,19 @@ void handle_get(int client_fd,
         (size_t)file_info.st_size;
 
 
-    FILE *file =
-        fopen(filepath, "rb");
+    FILE *file = fopen(filepath, "rb");
+
 
     if (file == NULL)
     {
         const char *error_response =
             "ERR FILE_READ_FAILED SID:" SID "\n";
 
+
         send_all(client_fd,
                  error_response,
                  strlen(error_response));
+
 
         return;
     }
@@ -564,9 +692,11 @@ void handle_get(int client_fd,
     {
         fclose(file);
 
+
         printf("[Child %d] Failed to send file: %s\n",
                getpid(),
                filename);
+
 
         return;
     }
@@ -583,7 +713,7 @@ void handle_get(int client_fd,
 
 
 /* =========================================================
-   Part 10: Read Linux system statistics
+   Read Linux system statistics
    ========================================================= */
 
 int get_system_stats(SystemStats *stats)
@@ -591,9 +721,11 @@ int get_system_stats(SystemStats *stats)
     FILE *file;
 
     double load = 0.0;
+
     double uptime = 0.0;
 
     unsigned long mem_total_kb = 0;
+
     unsigned long mem_available_kb = 0;
 
     char line[256];
@@ -605,10 +737,8 @@ int get_system_stats(SystemStats *stats)
     }
 
 
-    /* CPU load */
+    file = fopen("/proc/loadavg", "r");
 
-    file =
-        fopen("/proc/loadavg", "r");
 
     if (file == NULL)
     {
@@ -629,10 +759,8 @@ int get_system_stats(SystemStats *stats)
     fclose(file);
 
 
-    /* Memory information */
+    file = fopen("/proc/meminfo", "r");
 
-    file =
-        fopen("/proc/meminfo", "r");
 
     if (file == NULL)
     {
@@ -671,10 +799,8 @@ int get_system_stats(SystemStats *stats)
     }
 
 
-    /* Uptime */
+    file = fopen("/proc/uptime", "r");
 
-    file =
-        fopen("/proc/uptime", "r");
 
     if (file == NULL)
     {
@@ -695,8 +821,7 @@ int get_system_stats(SystemStats *stats)
     fclose(file);
 
 
-    stats->cpu_load =
-        load;
+    stats->cpu_load = load;
 
 
     stats->mem_used_mb =
@@ -733,6 +858,7 @@ void handle_sysinfo(int client_fd)
                  error_response,
                  strlen(error_response));
 
+
         return;
     }
 
@@ -761,7 +887,7 @@ void handle_sysinfo(int client_fd)
 
 
 /* =========================================================
-   Part 10: UDP periodic monitoring sender
+   UDP periodic monitoring
    ========================================================= */
 
 void run_udp_monitor(struct in_addr controller_ip,
@@ -856,29 +982,36 @@ void run_udp_monitor(struct in_addr controller_ip,
 void handle_listproc(int client_fd)
 {
     FILE *fp;
+
     char line[BUFFER_SIZE];
 
-    fp =
-        popen("ps -eo pid,comm", "r");
+
+    fp = popen("ps -eo pid,comm", "r");
+
 
     if (fp == NULL)
     {
         const char *response =
             "ERR LISTPROC_FAILED SID:" SID "\n";
 
+
         send_all(client_fd,
                  response,
                  strlen(response));
 
+
         return;
     }
+
 
     const char *start =
         "OK LISTPROC SID:" SID "\n";
 
+
     send_all(client_fd,
              start,
              strlen(start));
+
 
     while (fgets(line,
                  sizeof(line),
@@ -889,10 +1022,13 @@ void handle_listproc(int client_fd)
                  strlen(line));
     }
 
+
     pclose(fp);
+
 
     const char *end =
         "END LISTPROC SID:" SID "\n";
+
 
     send_all(client_fd,
              end,
@@ -901,7 +1037,7 @@ void handle_listproc(int client_fd)
 
 
 /* =========================================================
-   EXEC
+   Restricted EXEC
    ========================================================= */
 
 void handle_exec(int client_fd,
@@ -909,32 +1045,28 @@ void handle_exec(int client_fd,
 {
     const char *system_command = NULL;
 
-    if (strcmp(exec_name,
-               "DATE") == 0)
+
+    if (strcmp(exec_name, "DATE") == 0)
     {
         system_command = "date";
     }
 
-    else if (strcmp(exec_name,
-                    "UPTIME") == 0)
+    else if (strcmp(exec_name, "UPTIME") == 0)
     {
         system_command = "uptime";
     }
 
-    else if (strcmp(exec_name,
-                    "DISKFREE") == 0)
+    else if (strcmp(exec_name, "DISKFREE") == 0)
     {
         system_command = "df -h";
     }
 
-    else if (strcmp(exec_name,
-                    "HOSTNAME") == 0)
+    else if (strcmp(exec_name, "HOSTNAME") == 0)
     {
         system_command = "hostname";
     }
 
-    else if (strcmp(exec_name,
-                    "WHOAMI") == 0)
+    else if (strcmp(exec_name, "WHOAMI") == 0)
     {
         system_command = "whoami";
     }
@@ -944,16 +1076,17 @@ void handle_exec(int client_fd,
         const char *response =
             "ERR EXEC_NOT_ALLOWED SID:" SID "\n";
 
+
         send_all(client_fd,
                  response,
                  strlen(response));
+
 
         return;
     }
 
 
-    FILE *fp =
-        popen(system_command, "r");
+    FILE *fp = popen(system_command, "r");
 
 
     if (fp == NULL)
@@ -961,9 +1094,11 @@ void handle_exec(int client_fd,
         const char *response =
             "ERR EXEC_FAILED SID:" SID "\n";
 
+
         send_all(client_fd,
                  response,
                  strlen(response));
+
 
         return;
     }
@@ -1020,11 +1155,16 @@ void handle_exec(int client_fd,
 int main(void)
 {
     int server_fd;
+
     int client_fd;
+
     int opt = 1;
 
+
     struct sockaddr_in server_addr;
+
     struct sockaddr_in client_addr;
+
 
     socklen_t client_len;
 
@@ -1108,12 +1248,7 @@ int main(void)
            PORT);
 
 
-    /*
-     * Prevent completed Controller child processes
-     * from remaining as zombies.
-     */
-    signal(SIGCHLD,
-           SIG_IGN);
+    signal(SIGCHLD, SIG_IGN);
 
 
     while (1)
@@ -1147,8 +1282,7 @@ int main(void)
                ntohs(client_addr.sin_port));
 
 
-        pid_t pid =
-            fork();
+        pid_t pid = fork();
 
 
         if (pid < 0)
@@ -1162,7 +1296,7 @@ int main(void)
 
 
         /* =================================================
-           Controller session child
+           Controller-session child
            ================================================= */
 
         if (pid == 0)
@@ -1173,20 +1307,16 @@ int main(void)
 
             int authenticated = 0;
 
+            pid_t monitor_pid = -1;
+
 
             /*
-             * Part 10:
-             *
-             * -1 means UDP monitoring is currently OFF
-             * for this Controller session.
+             * Main Agent ignores SIGCHLD.
+             * Session child restores default behaviour
+             * because it must wait for its UDP monitor child.
              */
-            
-            
-            
-            
-            
-            pid_t monitor_pid = -1;
-            signal(SIGCHLD,SIG_DFL);
+            signal(SIGCHLD, SIG_DFL);
+
 
             close(server_fd);
 
@@ -1242,6 +1372,22 @@ int main(void)
 
                 printf("[Child %d] Authentication successful.\n",
                        getpid());
+
+
+                /*
+                 * Part 11 Change 1:
+                 * Log successful authentication.
+                 */
+                char auth_log[256];
+
+
+                snprintf(auth_log,
+                         sizeof(auth_log),
+                         "Authentication successful: %s",
+                         inet_ntoa(client_addr.sin_addr));
+
+
+                write_log(auth_log);
             }
 
             else
@@ -1253,6 +1399,21 @@ int main(void)
                 send_all(client_fd,
                          response,
                          strlen(response));
+
+
+                /*
+                 * Log failed authentication.
+                 */
+                char auth_fail_log[256];
+
+
+                snprintf(auth_fail_log,
+                         sizeof(auth_fail_log),
+                         "Authentication failed: %s",
+                         inet_ntoa(client_addr.sin_addr));
+
+
+                write_log(auth_fail_log);
 
 
                 close(client_fd);
@@ -1278,6 +1439,19 @@ int main(void)
                     printf("[Child %d] Controller disconnected.\n",
                            getpid());
 
+
+                    char disconnect_log[256];
+
+
+                    snprintf(disconnect_log,
+                             sizeof(disconnect_log),
+                             "Controller disconnected unexpectedly: %s",
+                             inet_ntoa(client_addr.sin_addr));
+
+
+                    write_log(disconnect_log);
+
+
                     break;
                 }
 
@@ -1286,6 +1460,19 @@ int main(void)
                 {
                     perror("recv");
 
+
+                    char recv_error_log[256];
+
+
+                    snprintf(recv_error_log,
+                             sizeof(recv_error_log),
+                             "Controller receive error: %s",
+                             inet_ntoa(client_addr.sin_addr));
+
+
+                    write_log(recv_error_log);
+
+
                     break;
                 }
 
@@ -1293,6 +1480,23 @@ int main(void)
                 printf("[Child %d] Command: %s\n",
                        getpid(),
                        buffer);
+
+
+                /*
+                 * Part 11 Change 2:
+                 * Log every authenticated command.
+                 */
+                char log_message[BUFFER_SIZE + 32];
+
+
+                snprintf(log_message,
+                         sizeof(log_message),
+                         "Command from %s: %s",
+                         inet_ntoa(client_addr.sin_addr),
+                         buffer);
+
+
+                write_log(log_message);
 
 
                 /* =================================================
@@ -1364,6 +1568,7 @@ int main(void)
                                  strlen(response));
                     }
 
+
                     else if (file_size_value >
                              (unsigned long long)MAX_FILE_SIZE)
                     {
@@ -1376,6 +1581,7 @@ int main(void)
                                  strlen(response));
                     }
 
+
                     else
                     {
                         handle_put(client_fd,
@@ -1387,9 +1593,6 @@ int main(void)
 
                 /* =================================================
                    GET
-
-                   Expected:
-                   GET <filename>
                    ================================================= */
 
                 else if (strncmp(buffer,
@@ -1419,6 +1622,7 @@ int main(void)
                                  strlen(response));
                     }
 
+
                     else
                     {
                         handle_get(client_fd,
@@ -1428,10 +1632,7 @@ int main(void)
 
 
                 /* =================================================
-                   Part 10: MONITOR START <udp_port>
-
-                   Example:
-                   MONITOR START 9500
+                   MONITOR START <udp_port>
                    ================================================= */
 
                 else if (strncmp(buffer,
@@ -1450,9 +1651,6 @@ int main(void)
                                &extra);
 
 
-                    /*
-                     * Check for exactly one valid UDP port.
-                     */
                     if (parsed != 1 ||
                         udp_port < 1 ||
                         udp_port > 65535)
@@ -1467,10 +1665,6 @@ int main(void)
                     }
 
 
-                    /*
-                     * Prevent two monitors from being started
-                     * for the same Controller session.
-                     */
                     else if (monitor_pid > 0)
                     {
                         const char *response =
@@ -1485,8 +1679,7 @@ int main(void)
 
                     else
                     {
-                        monitor_pid =
-                            fork();
+                        monitor_pid = fork();
 
 
                         if (monitor_pid < 0)
@@ -1507,15 +1700,8 @@ int main(void)
                         }
 
 
-                        /*
-                         * UDP monitoring child
-                         */
                         else if (monitor_pid == 0)
                         {
-                            /*
-                             * This child sends UDP only.
-                             * It does not need the TCP socket.
-                             */
                             close(client_fd);
 
 
@@ -1527,9 +1713,6 @@ int main(void)
                         }
 
 
-                        /*
-                         * TCP Controller-session child
-                         */
                         else
                         {
                             const char *response =
@@ -1551,6 +1734,7 @@ int main(void)
 
                                 monitor_pid = -1;
 
+
                                 break;
                             }
 
@@ -1568,7 +1752,7 @@ int main(void)
 
 
                 /* =================================================
-                   Part 10: MONITOR STOP
+                   MONITOR STOP
                    ================================================= */
 
                 else if (strcmp(buffer,
@@ -1612,6 +1796,81 @@ int main(void)
 
 
                 /* =================================================
+                   Part 11 Change 3:
+                   Graceful EXIT
+                   ================================================= */
+
+                else if (strcmp(buffer,
+                                "EXIT") == 0)
+                {
+                    /*
+                     * Stop UDP monitor first if it is
+                     * still running.
+                     */
+                    if (monitor_pid > 0)
+                    {
+                        pid_t old_monitor_pid =
+                            monitor_pid;
+
+
+                        kill(monitor_pid,
+                             SIGTERM);
+
+
+                        waitpid(monitor_pid,
+                                NULL,
+                                0);
+
+
+                        monitor_pid = -1;
+
+
+                        printf("[Child %d] UDP monitor PID %d stopped "
+                               "during graceful EXIT.\n",
+                               getpid(),
+                               old_monitor_pid);
+                    }
+
+
+                    /*
+                     * Send graceful disconnect response.
+                     */
+                    const char *response =
+                        "OK BYE SID:" SID "\n";
+
+
+                    send_all(client_fd,
+                             response,
+                             strlen(response));
+
+
+                    /*
+                     * Log graceful disconnect.
+                     */
+                    char exit_log[256];
+
+
+                    snprintf(exit_log,
+                             sizeof(exit_log),
+                             "Graceful disconnect: %s",
+                             inet_ntoa(client_addr.sin_addr));
+
+
+                    write_log(exit_log);
+
+
+                    printf("[Child %d] Graceful Controller disconnect.\n",
+                           getpid());
+
+
+                    authenticated = 0;
+
+
+                    break;
+                }
+
+
+                /* =================================================
                    Unknown command
                    ================================================= */
 
@@ -1632,9 +1891,7 @@ int main(void)
 
 
             /* =================================================
-               Part 10:
-               Clean up monitor if Controller disconnects
-               without sending MONITOR STOP.
+               Cleanup if monitoring is still running
                ================================================= */
 
             if (monitor_pid > 0)
@@ -1654,12 +1911,13 @@ int main(void)
 
             close(client_fd);
 
+
             exit(EXIT_SUCCESS);
         }
 
 
         /* =================================================
-           Original Agent parent
+           Main Agent parent
            ================================================= */
 
         else
@@ -1670,6 +1928,7 @@ int main(void)
 
 
     close(server_fd);
+
 
     return EXIT_SUCCESS;
 }

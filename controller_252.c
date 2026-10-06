@@ -19,7 +19,9 @@
    ========================================================= */
 
 #define PORT 9410
+
 #define AUTH_TOKEN "OPS-3252"
+
 #define SID "2523"
 
 #define BUFFER_SIZE 1024
@@ -30,7 +32,7 @@
 
 
 /* =========================================================
-   Receive one newline-terminated TCP protocol line
+   Receive one newline-terminated TCP line
    ========================================================= */
 
 ssize_t recv_line(int sockfd,
@@ -39,20 +41,24 @@ ssize_t recv_line(int sockfd,
 {
     size_t total = 0;
 
+
     if (size == 0)
     {
         return -1;
     }
 
+
     while (total < size - 1)
     {
         char ch;
+
 
         ssize_t n =
             recv(sockfd,
                  &ch,
                  1,
                  0);
+
 
         if (n == 0)
         {
@@ -64,6 +70,7 @@ ssize_t recv_line(int sockfd,
             break;
         }
 
+
         if (n < 0)
         {
             if (errno == EINTR)
@@ -74,10 +81,12 @@ ssize_t recv_line(int sockfd,
             return -1;
         }
 
+
         if (ch == '\n')
         {
             break;
         }
+
 
         if (ch != '\r')
         {
@@ -85,7 +94,9 @@ ssize_t recv_line(int sockfd,
         }
     }
 
+
     buffer[total] = '\0';
+
 
     return (ssize_t)total;
 }
@@ -101,6 +112,7 @@ int send_all(int sockfd,
 {
     size_t total_sent = 0;
 
+
     while (total_sent < length)
     {
         ssize_t n =
@@ -108,6 +120,7 @@ int send_all(int sockfd,
                  data + total_sent,
                  length - total_sent,
                  0);
+
 
         if (n < 0)
         {
@@ -119,20 +132,23 @@ int send_all(int sockfd,
             return -1;
         }
 
+
         if (n == 0)
         {
             return -1;
         }
 
+
         total_sent += (size_t)n;
     }
+
 
     return 0;
 }
 
 
 /* =========================================================
-   PUT: Send exact raw file bytes
+   Send exact raw file bytes for PUT
    ========================================================= */
 
 int send_file_bytes(int sockfd,
@@ -143,15 +159,18 @@ int send_file_bytes(int sockfd,
 
     size_t total_sent = 0;
 
+
     while (total_sent < filesize)
     {
         size_t remaining =
             filesize - total_sent;
 
+
         size_t chunk_size =
             remaining < sizeof(buffer)
             ? remaining
             : sizeof(buffer);
+
 
         size_t bytes_read =
             fread(buffer,
@@ -159,10 +178,12 @@ int send_file_bytes(int sockfd,
                   chunk_size,
                   file);
 
+
         if (bytes_read == 0)
         {
             return -1;
         }
+
 
         if (send_all(sockfd,
                      buffer,
@@ -171,15 +192,17 @@ int send_file_bytes(int sockfd,
             return -1;
         }
 
+
         total_sent += bytes_read;
     }
+
 
     return 0;
 }
 
 
 /* =========================================================
-   GET: Receive exact raw file bytes
+   Receive exact raw file bytes for GET
    ========================================================= */
 
 int receive_file_bytes(int sockfd,
@@ -190,15 +213,18 @@ int receive_file_bytes(int sockfd,
 
     size_t total_received = 0;
 
+
     while (total_received < filesize)
     {
         size_t remaining =
             filesize - total_received;
 
+
         size_t chunk_size =
             remaining < sizeof(buffer)
             ? remaining
             : sizeof(buffer);
+
 
         ssize_t n =
             recv(sockfd,
@@ -206,10 +232,12 @@ int receive_file_bytes(int sockfd,
                  chunk_size,
                  0);
 
+
         if (n == 0)
         {
             return -1;
         }
+
 
         if (n < 0)
         {
@@ -221,34 +249,37 @@ int receive_file_bytes(int sockfd,
             return -1;
         }
 
+
         size_t written =
             fwrite(buffer,
                    1,
                    (size_t)n,
                    file);
 
+
         if (written != (size_t)n)
         {
             return -1;
         }
 
+
         total_received += (size_t)n;
     }
+
 
     return 0;
 }
 
 
 /* =========================================================
-   Receive a multi-line command response
-
-   Used by LISTPROC and EXEC.
+   Receive multi-line command response
    ========================================================= */
 
 int receive_command_response(int sockfd,
                              const char *end_marker)
 {
     char buffer[BUFFER_SIZE];
+
 
     while (1)
     {
@@ -257,6 +288,7 @@ int receive_command_response(int sockfd,
                       buffer,
                       sizeof(buffer));
 
+
         if (n == 0)
         {
             printf("Agent closed the connection.\n");
@@ -264,12 +296,14 @@ int receive_command_response(int sockfd,
             return -1;
         }
 
+
         if (n < 0)
         {
             perror("recv");
 
             return -1;
         }
+
 
         printf("%s\n",
                buffer);
@@ -282,6 +316,10 @@ int receive_command_response(int sockfd,
         }
 
 
+        /*
+         * Error responses are single-line responses,
+         * so do not continue waiting for END marker.
+         */
         if (strncmp(buffer,
                     "ERR ",
                     4) == 0)
@@ -289,6 +327,7 @@ int receive_command_response(int sockfd,
             break;
         }
     }
+
 
     return 0;
 }
@@ -298,79 +337,42 @@ int receive_command_response(int sockfd,
    PUT upload
    ========================================================= */
 
-int upload_file(int sockfd,
-                const char *local_path)
+void upload_file(int sockfd,
+                 const char *filename)
 {
     FILE *file;
 
     struct stat file_info;
 
     char command[BUFFER_SIZE];
+
     char response[BUFFER_SIZE];
-    char expected[BUFFER_SIZE];
-
-    const char *filename;
 
 
-    filename =
-        strrchr(local_path,
-                '/');
-
-
-    if (filename)
-    {
-        filename++;
-    }
-
-    else
-    {
-        filename =
-            local_path;
-    }
-
-
-    if (filename[0] == '\0')
-    {
-        printf("Invalid file name.\n");
-
-        return -1;
-    }
-
-
-    if (stat(local_path,
+    if (stat(filename,
              &file_info) < 0)
     {
-        perror("stat");
+        printf("Local file not found: %s\n",
+               filename);
 
-        printf("Cannot find local file: %s\n",
-               local_path);
-
-        return -1;
+        return;
     }
 
 
     if (!S_ISREG(file_info.st_mode))
     {
-        printf("PUT requires a regular file.\n");
+        printf("Not a regular file: %s\n",
+               filename);
 
-        return -1;
+        return;
     }
 
 
     if (file_info.st_size < 0)
     {
-        printf("Invalid file size.\n");
+        printf("Unable to determine file size.\n");
 
-        return -1;
-    }
-
-
-    if ((unsigned long long)file_info.st_size >
-        (unsigned long long)MAX_FILE_SIZE)
-    {
-        printf("File is larger than the 10 MB upload limit.\n");
-
-        return -1;
+        return;
     }
 
 
@@ -378,16 +380,45 @@ int upload_file(int sockfd,
         (size_t)file_info.st_size;
 
 
+    if (filesize > MAX_FILE_SIZE)
+    {
+        printf("File is too large. Maximum size is 10 MB.\n");
+
+        return;
+    }
+
+
     file =
-        fopen(local_path,
+        fopen(filename,
               "rb");
 
 
-    if (!file)
+    if (file == NULL)
     {
         perror("fopen");
 
-        return -1;
+        return;
+    }
+
+
+    /*
+     * Only send the base filename.
+     * Do not send a local path to the Agent.
+     */
+    const char *base_filename =
+        strrchr(filename,
+                '/');
+
+
+    if (base_filename != NULL)
+    {
+        base_filename++;
+    }
+
+    else
+    {
+        base_filename =
+            filename;
     }
 
 
@@ -395,7 +426,7 @@ int upload_file(int sockfd,
         snprintf(command,
                  sizeof(command),
                  "PUT %s %zu\n",
-                 filename,
+                 base_filename,
                  filesize);
 
 
@@ -406,7 +437,7 @@ int upload_file(int sockfd,
 
         fclose(file);
 
-        return -1;
+        return;
     }
 
 
@@ -418,12 +449,12 @@ int upload_file(int sockfd,
 
         fclose(file);
 
-        return -1;
+        return;
     }
 
 
     printf("Uploading %s (%zu bytes)...\n",
-           filename,
+           base_filename,
            filesize);
 
 
@@ -431,11 +462,11 @@ int upload_file(int sockfd,
                         file,
                         filesize) < 0)
     {
-        printf("Failed to send complete file.\n");
+        printf("File upload failed.\n");
 
         fclose(file);
 
-        return -1;
+        return;
     }
 
 
@@ -450,9 +481,9 @@ int upload_file(int sockfd,
 
     if (n == 0)
     {
-        printf("Agent disconnected before PUT response.\n");
+        printf("Agent closed the connection.\n");
 
-        return -1;
+        return;
     }
 
 
@@ -460,7 +491,7 @@ int upload_file(int sockfd,
     {
         perror("recv");
 
-        return -1;
+        return;
     }
 
 
@@ -468,33 +499,12 @@ int upload_file(int sockfd,
            response);
 
 
-    int expected_length =
-        snprintf(expected,
-                 sizeof(expected),
-                 "OK FILE_RECEIVED %s SID:%s",
-                 filename,
-                 SID);
-
-
-    if (expected_length < 0 ||
-        (size_t)expected_length >= sizeof(expected))
-    {
-        return -1;
-    }
-
-
-    if (strcmp(response,
-               expected) == 0)
+    if (strncmp(response,
+                "OK FILE_RECEIVED ",
+                17) == 0)
     {
         printf("Upload completed successfully.\n");
-
-        return 0;
     }
-
-
-    printf("Upload was not accepted by Agent.\n");
-
-    return -1;
 }
 
 
@@ -502,39 +512,18 @@ int upload_file(int sockfd,
    GET download
    ========================================================= */
 
-int download_file(int sockfd,
-                  const char *filename)
+void download_file(int sockfd,
+                   const char *filename)
 {
     char command[BUFFER_SIZE];
+
     char response[BUFFER_SIZE];
-    char filepath[512];
+
+    char download_path[512];
 
     unsigned long long file_size_value;
 
-    char sid_value[64];
-    char extra;
-
-
-    if (filename == NULL ||
-        filename[0] == '\0')
-    {
-        printf("Invalid filename.\n");
-
-        return -1;
-    }
-
-
-    if (strstr(filename,
-               "..") ||
-        strchr(filename,
-               '/') ||
-        strchr(filename,
-               '\\'))
-    {
-        printf("Invalid filename.\n");
-
-        return -1;
-    }
+    char received_sid[64];
 
 
     int command_length =
@@ -549,7 +538,7 @@ int download_file(int sockfd,
     {
         printf("GET command is too long.\n");
 
-        return -1;
+        return;
     }
 
 
@@ -559,7 +548,7 @@ int download_file(int sockfd,
     {
         perror("send");
 
-        return -1;
+        return;
     }
 
 
@@ -571,9 +560,9 @@ int download_file(int sockfd,
 
     if (n == 0)
     {
-        printf("Agent disconnected before GET response.\n");
+        printf("Agent closed the connection.\n");
 
-        return -1;
+        return;
     }
 
 
@@ -581,7 +570,7 @@ int download_file(int sockfd,
     {
         perror("recv");
 
-        return -1;
+        return;
     }
 
 
@@ -593,41 +582,40 @@ int download_file(int sockfd,
                 "ERR ",
                 4) == 0)
     {
-        return -1;
+        return;
     }
 
 
     int parsed =
         sscanf(response,
-               "OK FILE %llu SID:%63s %c",
+               "OK FILE %llu SID:%63s",
                &file_size_value,
-               sid_value,
-               &extra);
+               received_sid);
 
 
     if (parsed != 2)
     {
         printf("Invalid GET response from Agent.\n");
 
-        return -1;
+        return;
     }
 
 
-    if (strcmp(sid_value,
+    if (strcmp(received_sid,
                SID) != 0)
     {
-        printf("Unexpected SID in GET response.\n");
+        printf("SID mismatch in GET response.\n");
 
-        return -1;
+        return;
     }
 
 
     if (file_size_value >
         (unsigned long long)MAX_FILE_SIZE)
     {
-        printf("Agent file is larger than the supported limit.\n");
+        printf("Agent file is larger than allowed maximum.\n");
 
-        return -1;
+        return;
     }
 
 
@@ -635,33 +623,46 @@ int download_file(int sockfd,
         (size_t)file_size_value;
 
 
+    /*
+     * Create downloads directory if necessary.
+     */
+    if (mkdir(DOWNLOAD_DIR,
+              0755) < 0 &&
+        errno != EEXIST)
+    {
+        perror("mkdir downloads");
+
+        return;
+    }
+
+
     int path_length =
-        snprintf(filepath,
-                 sizeof(filepath),
+        snprintf(download_path,
+                 sizeof(download_path),
                  "%s/%s",
                  DOWNLOAD_DIR,
                  filename);
 
 
     if (path_length < 0 ||
-        (size_t)path_length >= sizeof(filepath))
+        (size_t)path_length >= sizeof(download_path))
     {
         printf("Download path is too long.\n");
 
-        return -1;
+        return;
     }
 
 
     FILE *file =
-        fopen(filepath,
+        fopen(download_path,
               "wb");
 
 
-    if (!file)
+    if (file == NULL)
     {
         perror("fopen");
 
-        return -1;
+        return;
     }
 
 
@@ -674,55 +675,47 @@ int download_file(int sockfd,
                            file,
                            filesize) < 0)
     {
+        printf("Download failed.\n");
+
         fclose(file);
 
-        remove(filepath);
+        remove(download_path);
 
-        printf("Download failed before complete file arrived.\n");
-
-        return -1;
+        return;
     }
 
 
     if (fclose(file) != 0)
     {
-        remove(filepath);
+        printf("Failed to close downloaded file correctly.\n");
 
-        printf("Failed to save downloaded file.\n");
+        remove(download_path);
 
-        return -1;
+        return;
     }
 
 
     printf("Download completed successfully.\n");
 
     printf("Saved as: %s\n",
-           filepath);
-
-
-    return 0;
+           download_path);
 }
 
 
 /* =========================================================
-   Part 10:
-   UDP monitoring listener
-
-   This function runs in a separate Controller child process.
+   UDP listener child
    ========================================================= */
 
 void run_udp_listener(int udp_fd)
 {
     char buffer[BUFFER_SIZE];
 
-    struct sockaddr_in sender_addr;
-
-    socklen_t sender_len;
-
 
     while (1)
     {
-        sender_len =
+        struct sockaddr_in sender_addr;
+
+        socklen_t sender_len =
             sizeof(sender_addr);
 
 
@@ -749,8 +742,7 @@ void run_udp_listener(int udp_fd)
         }
 
 
-        buffer[n] =
-            '\0';
+        buffer[n] = '\0';
 
 
         printf("\n[UDP MONITOR] %s\n",
@@ -759,8 +751,15 @@ void run_udp_listener(int udp_fd)
 
         printf("RemoteOps> ");
 
+
         fflush(stdout);
     }
+
+
+    close(udp_fd);
+
+
+    exit(EXIT_SUCCESS);
 }
 
 
@@ -773,33 +772,34 @@ int main(int argc,
 {
     int sockfd;
 
-    struct sockaddr_in agent_addr;
+    struct sockaddr_in server_addr;
 
     char buffer[BUFFER_SIZE];
 
     ssize_t bytes_received;
 
-
-    /*
-     * Part 10 UDP variables.
-     */
     int udp_fd = -1;
 
     pid_t udp_listener_pid = -1;
 
 
+    /* =====================================================
+       Check Agent IP argument
+       ===================================================== */
+
     if (argc != 2)
     {
         fprintf(stderr,
-                "Usage: %s <agent-ip>\n",
+                "Usage: %s <agent_ip>\n",
                 argv[0]);
+
 
         return EXIT_FAILURE;
     }
 
 
     /* =====================================================
-       Create TCP Controller socket
+       Create TCP socket
        ===================================================== */
 
     sockfd =
@@ -816,77 +816,97 @@ int main(int argc,
     }
 
 
-    printf("Controller TCP socket created successfully.\n");
+    printf("TCP socket created successfully.\n");
 
 
-    memset(&agent_addr,
+    memset(&server_addr,
            0,
-           sizeof(agent_addr));
+           sizeof(server_addr));
 
 
-    agent_addr.sin_family =
+    server_addr.sin_family =
         AF_INET;
 
 
-    agent_addr.sin_port =
+    server_addr.sin_port =
         htons(PORT);
 
 
     if (inet_pton(AF_INET,
                   argv[1],
-                  &agent_addr.sin_addr) <= 0)
+                  &server_addr.sin_addr) <= 0)
     {
         fprintf(stderr,
-                "Invalid Agent IPv4 address: %s\n",
+                "Invalid Agent IP address: %s\n",
                 argv[1]);
 
+
         close(sockfd);
+
 
         return EXIT_FAILURE;
     }
 
 
-    printf("Connecting to Agent %s:%d...\n",
+    /* =====================================================
+       Connect to Agent
+       ===================================================== */
+
+    printf("Connecting to RemoteOps Agent %s:%d...\n",
            argv[1],
            PORT);
 
 
     if (connect(sockfd,
-                (struct sockaddr *)&agent_addr,
-                sizeof(agent_addr)) < 0)
+                (struct sockaddr *)&server_addr,
+                sizeof(server_addr)) < 0)
     {
         perror("connect");
 
         close(sockfd);
 
+
         return EXIT_FAILURE;
     }
 
 
-    printf("Connected to RemoteOps Agent successfully.\n");
+    printf("Connected to RemoteOps Agent.\n");
 
 
     /* =====================================================
-       Authentication
+       AUTH
        ===================================================== */
 
-    const char *auth_command =
-        "AUTH " AUTH_TOKEN "\n";
+    char auth_command[BUFFER_SIZE];
 
 
-    if (send_all(sockfd,
-                 auth_command,
-                 strlen(auth_command)) < 0)
+    int auth_length =
+        snprintf(auth_command,
+                 sizeof(auth_command),
+                 "AUTH %s\n",
+                 AUTH_TOKEN);
+
+
+    if (auth_length < 0 ||
+        (size_t)auth_length >= sizeof(auth_command))
     {
-        perror("send");
-
         close(sockfd);
 
         return EXIT_FAILURE;
     }
 
 
-    printf("AUTH command sent.\n");
+    if (send_all(sockfd,
+                 auth_command,
+                 (size_t)auth_length) < 0)
+    {
+        perror("send AUTH");
+
+        close(sockfd);
+
+
+        return EXIT_FAILURE;
+    }
 
 
     bytes_received =
@@ -895,28 +915,39 @@ int main(int argc,
                   sizeof(buffer));
 
 
-    if (bytes_received <= 0)
+    if (bytes_received == 0)
     {
-        fprintf(stderr,
-                "Agent closed connection without AUTH response.\n");
+        printf("Agent closed connection during authentication.\n");
 
         close(sockfd);
+
 
         return EXIT_FAILURE;
     }
 
 
-    printf("Agent response: %s\n",
+    if (bytes_received < 0)
+    {
+        perror("recv AUTH");
+
+        close(sockfd);
+
+
+        return EXIT_FAILURE;
+    }
+
+
+    printf("%s\n",
            buffer);
 
 
     if (strcmp(buffer,
                "OK AUTHENTICATED SID:" SID) != 0)
     {
-        fprintf(stderr,
-                "Authentication failed.\n");
+        printf("Authentication failed.\n");
 
         close(sockfd);
+
 
         return EXIT_FAILURE;
     }
@@ -924,12 +955,9 @@ int main(int argc,
 
     printf("Authentication successful.\n");
 
-    printf("RemoteOps session SID: %s\n\n",
-           SID);
-
 
     /* =====================================================
-       Interactive command loop
+       Main Controller command loop
        ===================================================== */
 
     while (1)
@@ -949,11 +977,14 @@ int main(int argc,
         }
 
 
+        /*
+         * Remove newline entered by the user.
+         */
         buffer[strcspn(buffer,
-                      "\r\n")] = '\0';
+                       "\r\n")] = '\0';
 
 
-        if (strlen(buffer) == 0)
+        if (buffer[0] == '\0')
         {
             continue;
         }
@@ -961,9 +992,6 @@ int main(int argc,
 
         /* =================================================
            SYSINFO
-
-           Part 10 change:
-           SYSINFO is now ONE response line.
            ================================================= */
 
         if (strcmp(buffer,
@@ -991,7 +1019,7 @@ int main(int argc,
 
             if (bytes_received == 0)
             {
-                printf("Agent disconnected.\n");
+                printf("Agent closed the connection.\n");
 
                 break;
             }
@@ -1048,28 +1076,48 @@ int main(int argc,
                          "EXEC ",
                          5) == 0)
         {
-            char command[BUFFER_SIZE + 2];
+            char exec_name[128];
 
-            char end_marker[BUFFER_SIZE];
-
-            char exec_name[32];
+            char extra;
 
 
-            snprintf(exec_name,
-                     sizeof(exec_name),
-                     "%.31s",
-                     buffer + 5);
+            int parsed =
+                sscanf(buffer + 5,
+                       "%127s %c",
+                       exec_name,
+                       &extra);
 
 
-            snprintf(command,
-                     sizeof(command),
-                     "%s\n",
-                     buffer);
+            if (parsed != 1)
+            {
+                printf("Usage: EXEC <DATE|UPTIME|DISKFREE|HOSTNAME|WHOAMI>\n");
+
+                continue;
+            }
+
+
+            char command[BUFFER_SIZE];
+
+
+            int command_length =
+                snprintf(command,
+                         sizeof(command),
+                         "EXEC %s\n",
+                         exec_name);
+
+
+            if (command_length < 0 ||
+                (size_t)command_length >= sizeof(command))
+            {
+                printf("EXEC command is too long.\n");
+
+                continue;
+            }
 
 
             if (send_all(sockfd,
                          command,
-                         strlen(command)) < 0)
+                         (size_t)command_length) < 0)
             {
                 perror("send");
 
@@ -1077,11 +1125,24 @@ int main(int argc,
             }
 
 
-            snprintf(end_marker,
-                     sizeof(end_marker),
-                     "END EXEC %s SID:%s",
-                     exec_name,
-                     SID);
+            char end_marker[BUFFER_SIZE];
+
+
+            int marker_length =
+                snprintf(end_marker,
+                         sizeof(end_marker),
+                         "END EXEC %s SID:%s",
+                         exec_name,
+                         SID);
+
+
+            if (marker_length < 0 ||
+                (size_t)marker_length >= sizeof(end_marker))
+            {
+                printf("Unable to create EXEC end marker.\n");
+
+                break;
+            }
 
 
             if (receive_command_response(
@@ -1094,43 +1155,59 @@ int main(int argc,
 
 
         /* =================================================
-           PUT
+           PUT <filename>
            ================================================= */
 
         else if (strncmp(buffer,
                          "PUT ",
                          4) == 0)
         {
-            const char *local_path =
-                buffer + 4;
+            char filename[512];
+
+            char extra;
 
 
-            if (local_path[0] == '\0')
+            int parsed =
+                sscanf(buffer + 4,
+                       "%511s %c",
+                       filename,
+                       &extra);
+
+
+            if (parsed != 1)
             {
-                printf("Usage: PUT <local-file-path>\n");
+                printf("Usage: PUT <filename>\n");
 
                 continue;
             }
 
 
             upload_file(sockfd,
-                        local_path);
+                        filename);
         }
 
 
         /* =================================================
-           GET
+           GET <filename>
            ================================================= */
 
         else if (strncmp(buffer,
                          "GET ",
                          4) == 0)
         {
-            const char *filename =
-                buffer + 4;
+            char filename[256];
+
+            char extra;
 
 
-            if (filename[0] == '\0')
+            int parsed =
+                sscanf(buffer + 4,
+                       "%255s %c",
+                       filename,
+                       &extra);
+
+
+            if (parsed != 1)
             {
                 printf("Usage: GET <filename>\n");
 
@@ -1144,11 +1221,7 @@ int main(int argc,
 
 
         /* =================================================
-           Part 10:
            MONITOR START <udp_port>
-
-           Example:
-           MONITOR START 9500
            ================================================= */
 
         else if (strncmp(buffer,
@@ -1179,15 +1252,15 @@ int main(int argc,
 
             if (udp_listener_pid > 0)
             {
-                printf("Monitoring is already running.\n");
+                printf("UDP monitoring is already active.\n");
 
                 continue;
             }
 
 
-            /* ---------------------------------------------
-               Create Controller UDP socket
-               --------------------------------------------- */
+            /* =============================================
+               Create UDP socket before asking Agent to start
+               ============================================= */
 
             udp_fd =
                 socket(AF_INET,
@@ -1201,6 +1274,16 @@ int main(int argc,
 
                 continue;
             }
+
+
+            int reuse = 1;
+
+
+            setsockopt(udp_fd,
+                       SOL_SOCKET,
+                       SO_REUSEADDR,
+                       &reuse,
+                       sizeof(reuse));
 
 
             struct sockaddr_in udp_addr;
@@ -1223,20 +1306,18 @@ int main(int argc,
                 htons((unsigned short)udp_port);
 
 
-            /* ---------------------------------------------
-               Bind Controller UDP port BEFORE telling Agent
-               to start sending.
-               --------------------------------------------- */
-
             if (bind(udp_fd,
                      (struct sockaddr *)&udp_addr,
                      sizeof(udp_addr)) < 0)
             {
                 perror("UDP bind");
 
+
                 close(udp_fd);
 
+
                 udp_fd = -1;
+
 
                 continue;
             }
@@ -1259,13 +1340,10 @@ int main(int argc,
 
                 udp_fd = -1;
 
+
                 continue;
             }
 
-
-            /* ---------------------------------------------
-               Send MONITOR START over TCP
-               --------------------------------------------- */
 
             if (send_all(sockfd,
                          command,
@@ -1273,9 +1351,11 @@ int main(int argc,
             {
                 perror("send");
 
+
                 close(udp_fd);
 
                 udp_fd = -1;
+
 
                 break;
             }
@@ -1287,13 +1367,29 @@ int main(int argc,
                           sizeof(buffer));
 
 
-            if (bytes_received <= 0)
+            if (bytes_received == 0)
             {
-                printf("Agent disconnected during MONITOR START.\n");
+                printf("Agent closed the connection.\n");
+
 
                 close(udp_fd);
 
                 udp_fd = -1;
+
+
+                break;
+            }
+
+
+            if (bytes_received < 0)
+            {
+                perror("recv");
+
+
+                close(udp_fd);
+
+                udp_fd = -1;
+
 
                 break;
             }
@@ -1303,10 +1399,6 @@ int main(int argc,
                    buffer);
 
 
-            /*
-             * Start local UDP listener only if Agent
-             * accepted MONITOR START.
-             */
             if (strcmp(buffer,
                        "OK MONITOR_STARTED SID:" SID) != 0)
             {
@@ -1314,28 +1406,24 @@ int main(int argc,
 
                 udp_fd = -1;
 
+
                 continue;
             }
 
 
-            /* ---------------------------------------------
-               Create UDP listener child
-               --------------------------------------------- */
-
+            /*
+             * Start child process that listens for
+             * periodic UDP SYSINFO datagrams.
+             */
             udp_listener_pid =
                 fork();
 
 
             if (udp_listener_pid < 0)
             {
-                perror("UDP listener fork");
+                perror("fork UDP listener");
 
 
-                /*
-                 * Agent already started monitoring.
-                 * Ask it to stop because local listener
-                 * could not be created.
-                 */
                 const char *stop_command =
                     "MONITOR STOP\n";
 
@@ -1354,7 +1442,9 @@ int main(int argc,
 
                 udp_fd = -1;
 
+
                 udp_listener_pid = -1;
+
 
                 continue;
             }
@@ -1363,7 +1453,8 @@ int main(int argc,
             else if (udp_listener_pid == 0)
             {
                 /*
-                 * UDP child does not use TCP.
+                 * UDP listener child does not use
+                 * the TCP Controller connection.
                  */
                 close(sockfd);
 
@@ -1371,22 +1462,21 @@ int main(int argc,
                 run_udp_listener(udp_fd);
 
 
-                close(udp_fd);
-
                 exit(EXIT_SUCCESS);
             }
 
 
             else
             {
-                printf("UDP monitoring is active on port %d.\n",
-                       udp_port);
+                printf("UDP monitoring listener started "
+                       "on port %d (PID %d).\n",
+                       udp_port,
+                       udp_listener_pid);
             }
         }
 
 
         /* =================================================
-           Part 10:
            MONITOR STOP
            ================================================= */
 
@@ -1413,9 +1503,17 @@ int main(int argc,
                           sizeof(buffer));
 
 
-            if (bytes_received <= 0)
+            if (bytes_received == 0)
             {
-                printf("Agent disconnected during MONITOR STOP.\n");
+                printf("Agent closed the connection.\n");
+
+                break;
+            }
+
+
+            if (bytes_received < 0)
+            {
+                perror("recv");
 
                 break;
             }
@@ -1425,8 +1523,46 @@ int main(int argc,
                    buffer);
 
 
+            if (udp_listener_pid > 0)
+            {
+                kill(udp_listener_pid,
+                     SIGTERM);
+
+
+                waitpid(udp_listener_pid,
+                        NULL,
+                        0);
+
+
+                udp_listener_pid = -1;
+            }
+
+
+            if (udp_fd >= 0)
+            {
+                close(udp_fd);
+
+                udp_fd = -1;
+            }
+        }
+
+
+        /* =================================================
+           Part 11 - Graceful EXIT
+           ================================================= */
+
+        else if (strcmp(buffer,
+                        "EXIT") == 0)
+        {
+            const char *command =
+                "EXIT\n";
+
+
             /*
-             * Stop Controller UDP listener.
+             * Stop the local UDP listener first.
+             *
+             * The Agent will stop its own monitor child
+             * when it receives EXIT.
              */
             if (udp_listener_pid > 0)
             {
@@ -1451,41 +1587,97 @@ int main(int argc,
             }
 
 
-            printf("UDP monitoring stopped locally.\n");
-        }
+            /*
+             * Send graceful EXIT to Agent.
+             */
+            if (send_all(sockfd,
+                         command,
+                         strlen(command)) < 0)
+            {
+                perror("send EXIT");
+
+                break;
+            }
 
 
-        /* =================================================
-           EXIT
-           ================================================= */
+            /*
+             * Wait for Agent's graceful disconnect
+             * acknowledgement.
+             */
+            bytes_received =
+                recv_line(sockfd,
+                          buffer,
+                          sizeof(buffer));
 
-        else if (strcmp(buffer,
-                        "EXIT") == 0)
-        {
+
+            if (bytes_received == 0)
+            {
+                printf("Agent closed the connection.\n");
+
+                break;
+            }
+
+
+            if (bytes_received < 0)
+            {
+                perror("recv EXIT");
+
+                break;
+            }
+
+
+            printf("%s\n",
+                   buffer);
+
+
+            if (strcmp(buffer,
+                       "OK BYE SID:" SID) == 0)
+            {
+                printf("Graceful disconnect successful.\n");
+            }
+
+            else
+            {
+                printf("Unexpected EXIT response from Agent.\n");
+            }
+
+
             printf("Closing Controller.\n");
+
 
             break;
         }
 
 
         /* =================================================
-           Generic command
+           Unknown local command
+           Send to Agent so Agent can return protocol error.
            ================================================= */
 
         else
         {
-            char command[BUFFER_SIZE + 2];
+            char command[BUFFER_SIZE];
 
 
-            snprintf(command,
-                     sizeof(command),
-                     "%s\n",
-                     buffer);
+            int command_length =
+                snprintf(command,
+                         sizeof(command),
+                         "%s\n",
+                         buffer);
+
+
+            if (command_length < 0 ||
+                (size_t)command_length >= sizeof(command))
+            {
+                printf("Command is too long.\n");
+
+                continue;
+            }
 
 
             if (send_all(sockfd,
                          command,
-                         strlen(command)) < 0)
+                         (size_t)command_length) < 0)
             {
                 perror("send");
 
@@ -1501,7 +1693,7 @@ int main(int argc,
 
             if (bytes_received == 0)
             {
-                printf("Agent disconnected.\n");
+                printf("Agent closed the connection.\n");
 
                 break;
             }
@@ -1522,27 +1714,30 @@ int main(int argc,
 
 
     /* =====================================================
-       Cleanup
+       Final cleanup
+
+       This is mainly for abnormal/local Controller exit.
+       Graceful EXIT already sets udp_listener_pid and
+       udp_fd to inactive values.
        ===================================================== */
 
     if (udp_listener_pid > 0)
     {
-        /*
-         * Ask Agent to stop its monitoring process
-         * before Controller closes.
-         */
         const char *stop_command =
             "MONITOR STOP\n";
 
 
-        send_all(sockfd,
-                 stop_command,
-                 strlen(stop_command));
-
-
-        recv_line(sockfd,
-                  buffer,
-                  sizeof(buffer));
+        /*
+         * Best-effort request to stop Agent monitoring.
+         */
+        if (send_all(sockfd,
+                     stop_command,
+                     strlen(stop_command)) == 0)
+        {
+            recv_line(sockfd,
+                      buffer,
+                      sizeof(buffer));
+        }
 
 
         kill(udp_listener_pid,
@@ -1561,6 +1756,8 @@ int main(int argc,
     if (udp_fd >= 0)
     {
         close(udp_fd);
+
+        udp_fd = -1;
     }
 
 
