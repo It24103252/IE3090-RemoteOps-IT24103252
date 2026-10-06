@@ -21,6 +21,8 @@
 #define BUFFER_SIZE 1024
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
+#define DOWNLOAD_DIR "./downloads"
+
 
 /* =========================================================
    Receive one newline-terminated protocol line
@@ -41,10 +43,11 @@ ssize_t recv_line(int sockfd,
     {
         char ch;
 
-        ssize_t n = recv(sockfd,
-                         &ch,
-                         1,
-                         0);
+        ssize_t n =
+            recv(sockfd,
+                 &ch,
+                 1,
+                 0);
 
         if (n == 0)
         {
@@ -95,10 +98,11 @@ int send_all(int sockfd,
 
     while (total_sent < length)
     {
-        ssize_t n = send(sockfd,
-                         data + total_sent,
-                         length - total_sent,
-                         0);
+        ssize_t n =
+            send(sockfd,
+                 data + total_sent,
+                 length - total_sent,
+                 0);
 
         if (n < 0)
         {
@@ -123,7 +127,7 @@ int send_all(int sockfd,
 
 
 /* =========================================================
-   Send exactly filesize bytes from a local file
+   PUT: Send exactly filesize bytes from local file
    ========================================================= */
 
 int send_file_bytes(int sockfd,
@@ -152,11 +156,6 @@ int send_file_bytes(int sockfd,
 
         if (bytes_read == 0)
         {
-            if (ferror(file))
-            {
-                return -1;
-            }
-
             return -1;
         }
 
@@ -175,10 +174,68 @@ int send_file_bytes(int sockfd,
 
 
 /* =========================================================
-   Receive multi-line response
+   GET: Receive exactly filesize bytes into local file
+   ========================================================= */
 
-   Used by the current SYSINFO, LISTPROC and EXEC
-   implementation.
+int receive_file_bytes(int sockfd,
+                       FILE *file,
+                       size_t filesize)
+{
+    char buffer[4096];
+
+    size_t total_received = 0;
+
+    while (total_received < filesize)
+    {
+        size_t remaining =
+            filesize - total_received;
+
+        size_t chunk_size =
+            remaining < sizeof(buffer)
+            ? remaining
+            : sizeof(buffer);
+
+        ssize_t n =
+            recv(sockfd,
+                 buffer,
+                 chunk_size,
+                 0);
+
+        if (n == 0)
+        {
+            return -1;
+        }
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            return -1;
+        }
+
+        size_t written =
+            fwrite(buffer,
+                   1,
+                   (size_t)n,
+                   file);
+
+        if (written != (size_t)n)
+        {
+            return -1;
+        }
+
+        total_received += (size_t)n;
+    }
+
+    return 0;
+}
+
+
+/* =========================================================
+   Receive current multi-line command responses
    ========================================================= */
 
 int receive_command_response(int sockfd,
@@ -196,19 +253,16 @@ int receive_command_response(int sockfd,
         if (n == 0)
         {
             printf("Agent closed the connection.\n");
-
             return -1;
         }
 
         if (n < 0)
         {
             perror("recv");
-
             return -1;
         }
 
-        printf("%s\n",
-               buffer);
+        printf("%s\n", buffer);
 
         if (strcmp(buffer,
                    end_marker) == 0)
@@ -229,7 +283,7 @@ int receive_command_response(int sockfd,
 
 
 /* =========================================================
-   PUT a local file to Agent
+   PUT local file to Agent
    ========================================================= */
 
 int upload_file(int sockfd,
@@ -240,24 +294,14 @@ int upload_file(int sockfd,
     struct stat file_info;
 
     char command[BUFFER_SIZE];
-
     char response[BUFFER_SIZE];
+    char expected[BUFFER_SIZE];
 
     const char *filename;
 
 
-    /* -----------------------------------------------------
-       Get only the filename from local path.
-
-       Example:
-
-       /home/ravi/test.txt
-                    ↓
-                 test.txt
-       ----------------------------------------------------- */
-
-    filename = strrchr(local_path,
-                       '/');
+    filename =
+        strrchr(local_path, '/');
 
     if (filename != NULL)
     {
@@ -272,14 +316,9 @@ int upload_file(int sockfd,
     if (filename[0] == '\0')
     {
         printf("Invalid file name.\n");
-
         return -1;
     }
 
-
-    /* -----------------------------------------------------
-       Obtain file information
-       ----------------------------------------------------- */
 
     if (stat(local_path,
              &file_info) < 0)
@@ -293,13 +332,9 @@ int upload_file(int sockfd,
     }
 
 
-    /*
-     * Only regular files are accepted.
-     */
     if (!S_ISREG(file_info.st_mode))
     {
         printf("PUT requires a regular file.\n");
-
         return -1;
     }
 
@@ -307,7 +342,6 @@ int upload_file(int sockfd,
     if (file_info.st_size < 0)
     {
         printf("Invalid file size.\n");
-
         return -1;
     }
 
@@ -316,7 +350,6 @@ int upload_file(int sockfd,
         (unsigned long long)MAX_FILE_SIZE)
     {
         printf("File is larger than the 10 MB upload limit.\n");
-
         return -1;
     }
 
@@ -325,26 +358,15 @@ int upload_file(int sockfd,
         (size_t)file_info.st_size;
 
 
-    /* -----------------------------------------------------
-       Open local file in binary-read mode
-       ----------------------------------------------------- */
-
-    file = fopen(local_path,
-                 "rb");
+    file =
+        fopen(local_path, "rb");
 
     if (file == NULL)
     {
         perror("fopen");
-
         return -1;
     }
 
-
-    /* -----------------------------------------------------
-       Build official PUT command:
-
-       PUT <filename> <filesize>\n
-       ----------------------------------------------------- */
 
     int command_length =
         snprintf(command,
@@ -360,14 +382,9 @@ int upload_file(int sockfd,
         printf("PUT command is too long.\n");
 
         fclose(file);
-
         return -1;
     }
 
-
-    /* -----------------------------------------------------
-       Send PUT command line
-       ----------------------------------------------------- */
 
     if (send_all(sockfd,
                  command,
@@ -376,7 +393,6 @@ int upload_file(int sockfd,
         perror("send");
 
         fclose(file);
-
         return -1;
     }
 
@@ -386,10 +402,6 @@ int upload_file(int sockfd,
            filesize);
 
 
-    /* -----------------------------------------------------
-       Immediately send exactly filesize raw bytes
-       ----------------------------------------------------- */
-
     if (send_file_bytes(sockfd,
                         file,
                         filesize) < 0)
@@ -397,17 +409,12 @@ int upload_file(int sockfd,
         printf("Failed to send complete file.\n");
 
         fclose(file);
-
         return -1;
     }
 
 
     fclose(file);
 
-
-    /* -----------------------------------------------------
-       Wait for Agent PUT response
-       ----------------------------------------------------- */
 
     ssize_t n =
         recv_line(sockfd,
@@ -418,7 +425,6 @@ int upload_file(int sockfd,
     if (n == 0)
     {
         printf("Agent disconnected before PUT response.\n");
-
         return -1;
     }
 
@@ -426,19 +432,12 @@ int upload_file(int sockfd,
     if (n < 0)
     {
         perror("recv");
-
         return -1;
     }
 
 
-    printf("%s\n",
-           response);
+    printf("%s\n", response);
 
-
-    /*
-     * Verify successful response.
-     */
-    char expected[BUFFER_SIZE];
 
     int expected_length =
         snprintf(expected,
@@ -459,7 +458,6 @@ int upload_file(int sockfd,
                expected) == 0)
     {
         printf("Upload completed successfully.\n");
-
         return 0;
     }
 
@@ -471,7 +469,235 @@ int upload_file(int sockfd,
 
 
 /* =========================================================
-   Main Controller
+   GET file from Agent
+   ========================================================= */
+
+int download_file(int sockfd,
+                  const char *filename)
+{
+    char command[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+    char filepath[512];
+
+    unsigned long long file_size_value;
+
+    char sid_value[64];
+
+    char extra;
+
+
+    /* -----------------------------------------------------
+       Validate local filename
+       ----------------------------------------------------- */
+
+    if (filename == NULL ||
+        filename[0] == '\0')
+    {
+        printf("Invalid filename.\n");
+        return -1;
+    }
+
+
+    if (strstr(filename, "..") != NULL ||
+        strchr(filename, '/') != NULL ||
+        strchr(filename, '\\') != NULL)
+    {
+        printf("Invalid filename.\n");
+        return -1;
+    }
+
+
+    /* -----------------------------------------------------
+       Build GET command
+       ----------------------------------------------------- */
+
+    int command_length =
+        snprintf(command,
+                 sizeof(command),
+                 "GET %s\n",
+                 filename);
+
+
+    if (command_length < 0 ||
+        (size_t)command_length >= sizeof(command))
+    {
+        printf("GET command is too long.\n");
+        return -1;
+    }
+
+
+    /* -----------------------------------------------------
+       Send GET command
+       ----------------------------------------------------- */
+
+    if (send_all(sockfd,
+                 command,
+                 (size_t)command_length) < 0)
+    {
+        perror("send");
+        return -1;
+    }
+
+
+    /* -----------------------------------------------------
+       Receive Agent response header
+
+       Expected success:
+       OK FILE <filesize> SID:2523
+       ----------------------------------------------------- */
+
+    ssize_t n =
+        recv_line(sockfd,
+                  response,
+                  sizeof(response));
+
+
+    if (n == 0)
+    {
+        printf("Agent disconnected before GET response.\n");
+        return -1;
+    }
+
+
+    if (n < 0)
+    {
+        perror("recv");
+        return -1;
+    }
+
+
+    printf("%s\n", response);
+
+
+    /*
+     * Handle errors such as:
+     * ERR 005 FILE_NOT_FOUND SID:2523
+     */
+    if (strncmp(response,
+                "ERR ",
+                4) == 0)
+    {
+        return -1;
+    }
+
+
+    int parsed =
+        sscanf(response,
+               "OK FILE %llu SID:%63s %c",
+               &file_size_value,
+               sid_value,
+               &extra);
+
+
+    if (parsed != 2)
+    {
+        printf("Invalid GET response from Agent.\n");
+        return -1;
+    }
+
+
+    if (strcmp(sid_value,
+               SID) != 0)
+    {
+        printf("Unexpected SID in GET response.\n");
+        return -1;
+    }
+
+
+    if (file_size_value >
+        (unsigned long long)MAX_FILE_SIZE)
+    {
+        printf("Agent file is larger than the supported limit.\n");
+        return -1;
+    }
+
+
+    size_t filesize =
+        (size_t)file_size_value;
+
+
+    /* -----------------------------------------------------
+       Build local destination:
+
+       ./downloads/<filename>
+       ----------------------------------------------------- */
+
+    int path_length =
+        snprintf(filepath,
+                 sizeof(filepath),
+                 "%s/%s",
+                 DOWNLOAD_DIR,
+                 filename);
+
+
+    if (path_length < 0 ||
+        (size_t)path_length >= sizeof(filepath))
+    {
+        printf("Download path is too long.\n");
+        return -1;
+    }
+
+
+    /* -----------------------------------------------------
+       Open local destination
+       ----------------------------------------------------- */
+
+    FILE *file =
+        fopen(filepath, "wb");
+
+
+    if (file == NULL)
+    {
+        perror("fopen");
+        return -1;
+    }
+
+
+    printf("Downloading %s (%zu bytes)...\n",
+           filename,
+           filesize);
+
+
+    /* -----------------------------------------------------
+       Receive exactly filesize raw bytes
+       ----------------------------------------------------- */
+
+    if (receive_file_bytes(sockfd,
+                           file,
+                           filesize) < 0)
+    {
+        fclose(file);
+
+        remove(filepath);
+
+        printf("Download failed before complete file arrived.\n");
+
+        return -1;
+    }
+
+
+    if (fclose(file) != 0)
+    {
+        remove(filepath);
+
+        printf("Failed to save downloaded file.\n");
+
+        return -1;
+    }
+
+
+    printf("Download completed successfully.\n");
+
+    printf("Saved as: %s\n",
+           filepath);
+
+
+    return 0;
+}
+
+
+/* =========================================================
+   MAIN
    ========================================================= */
 
 int main(int argc,
@@ -486,10 +712,6 @@ int main(int argc,
     ssize_t bytes_received;
 
 
-    /* =====================================================
-       STEP 1: Check Agent IP
-       ===================================================== */
-
     if (argc != 2)
     {
         fprintf(stderr,
@@ -500,10 +722,6 @@ int main(int argc,
     }
 
 
-    /* =====================================================
-       STEP 2: Create TCP socket
-       ===================================================== */
-
     sockfd =
         socket(AF_INET,
                SOCK_STREAM,
@@ -513,17 +731,12 @@ int main(int argc,
     if (sockfd < 0)
     {
         perror("socket");
-
         return EXIT_FAILURE;
     }
 
 
     printf("Controller TCP socket created successfully.\n");
 
-
-    /* =====================================================
-       STEP 3: Prepare Agent address
-       ===================================================== */
 
     memset(&agent_addr,
            0,
@@ -532,7 +745,6 @@ int main(int argc,
 
     agent_addr.sin_family =
         AF_INET;
-
 
     agent_addr.sin_port =
         htons(PORT);
@@ -547,14 +759,9 @@ int main(int argc,
                 argv[1]);
 
         close(sockfd);
-
         return EXIT_FAILURE;
     }
 
-
-    /* =====================================================
-       STEP 4: Connect
-       ===================================================== */
 
     printf("Connecting to Agent %s:%d...\n",
            argv[1],
@@ -568,7 +775,6 @@ int main(int argc,
         perror("connect");
 
         close(sockfd);
-
         return EXIT_FAILURE;
     }
 
@@ -577,7 +783,7 @@ int main(int argc,
 
 
     /* =====================================================
-       STEP 5: AUTH
+       AUTH
        ===================================================== */
 
     const char *auth_command =
@@ -591,7 +797,6 @@ int main(int argc,
         perror("send");
 
         close(sockfd);
-
         return EXIT_FAILURE;
     }
 
@@ -605,23 +810,12 @@ int main(int argc,
                   sizeof(buffer));
 
 
-    if (bytes_received == 0)
+    if (bytes_received <= 0)
     {
         fprintf(stderr,
                 "Agent closed connection without AUTH response.\n");
 
         close(sockfd);
-
-        return EXIT_FAILURE;
-    }
-
-
-    if (bytes_received < 0)
-    {
-        perror("recv");
-
-        close(sockfd);
-
         return EXIT_FAILURE;
     }
 
@@ -637,7 +831,6 @@ int main(int argc,
                 "Authentication failed.\n");
 
         close(sockfd);
-
         return EXIT_FAILURE;
     }
 
@@ -649,7 +842,7 @@ int main(int argc,
 
 
     /* =====================================================
-       STEP 6: Authenticated command loop
+       Interactive command loop
        ===================================================== */
 
     while (1)
@@ -664,14 +857,10 @@ int main(int argc,
                   stdin) == NULL)
         {
             printf("\nInput closed.\n");
-
             break;
         }
 
 
-        /*
-         * Remove keyboard newline.
-         */
         buffer[strcspn(buffer,
                       "\r\n")] = '\0';
 
@@ -682,9 +871,7 @@ int main(int argc,
         }
 
 
-        /* =================================================
-           SYSINFO
-           ================================================= */
+        /* SYSINFO */
 
         if (strcmp(buffer,
                    "SYSINFO") == 0)
@@ -698,7 +885,6 @@ int main(int argc,
                          strlen(command)) < 0)
             {
                 perror("send");
-
                 break;
             }
 
@@ -712,9 +898,7 @@ int main(int argc,
         }
 
 
-        /* =================================================
-           LISTPROC
-           ================================================= */
+        /* LISTPROC */
 
         else if (strcmp(buffer,
                         "LISTPROC") == 0)
@@ -728,7 +912,6 @@ int main(int argc,
                          strlen(command)) < 0)
             {
                 perror("send");
-
                 break;
             }
 
@@ -742,9 +925,7 @@ int main(int argc,
         }
 
 
-        /* =================================================
-           EXEC
-           ================================================= */
+        /* EXEC */
 
         else if (strncmp(buffer,
                          "EXEC ",
@@ -774,7 +955,6 @@ int main(int argc,
                          strlen(command)) < 0)
             {
                 perror("send");
-
                 break;
             }
 
@@ -795,17 +975,7 @@ int main(int argc,
         }
 
 
-        /* =================================================
-           PUT
-
-           Controller usage:
-
-           PUT <local-file-path>
-
-           Example:
-
-           PUT put_test.txt
-           ================================================= */
+        /* PUT */
 
         else if (strncmp(buffer,
                          "PUT ",
@@ -818,7 +988,6 @@ int main(int argc,
             if (local_path[0] == '\0')
             {
                 printf("Usage: PUT <local-file-path>\n");
-
                 continue;
             }
 
@@ -829,21 +998,43 @@ int main(int argc,
 
 
         /* =================================================
-           Temporary local EXIT
+           GET
+
+           Usage:
+           GET <filename>
            ================================================= */
+
+        else if (strncmp(buffer,
+                         "GET ",
+                         4) == 0)
+        {
+            const char *filename =
+                buffer + 4;
+
+
+            if (filename[0] == '\0')
+            {
+                printf("Usage: GET <filename>\n");
+                continue;
+            }
+
+
+            download_file(sockfd,
+                          filename);
+        }
+
+
+        /* Temporary EXIT */
 
         else if (strcmp(buffer,
                         "EXIT") == 0)
         {
             printf("Closing Controller.\n");
-
             break;
         }
 
 
-        /* =================================================
-           Other commands
-           ================================================= */
+        /* Other commands */
 
         else
         {
@@ -861,7 +1052,6 @@ int main(int argc,
                          strlen(command)) < 0)
             {
                 perror("send");
-
                 break;
             }
 
@@ -875,7 +1065,6 @@ int main(int argc,
             if (bytes_received == 0)
             {
                 printf("Agent disconnected.\n");
-
                 break;
             }
 
@@ -883,7 +1072,6 @@ int main(int argc,
             if (bytes_received < 0)
             {
                 perror("recv");
-
                 break;
             }
 
@@ -896,9 +1084,7 @@ int main(int argc,
 
     close(sockfd);
 
-
     printf("Controller connection closed.\n");
-
 
     return EXIT_SUCCESS;
 }

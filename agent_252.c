@@ -7,6 +7,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -45,10 +46,7 @@ ssize_t recv_line(int sockfd,
     {
         char ch;
 
-        ssize_t n = recv(sockfd,
-                         &ch,
-                         1,
-                         0);
+        ssize_t n = recv(sockfd, &ch, 1, 0);
 
         if (n == 0)
         {
@@ -127,7 +125,7 @@ int send_all(int sockfd,
 
 
 /* =========================================================
-   Receive exactly filesize raw bytes and write them to file
+   PUT: Receive exactly filesize raw bytes
    ========================================================= */
 
 int receive_file_bytes(int sockfd,
@@ -153,10 +151,6 @@ int receive_file_bytes(int sockfd,
                          chunk_size,
                          0);
 
-        /*
-         * Connection closed before all expected
-         * file bytes were received.
-         */
         if (n == 0)
         {
             return -1;
@@ -191,14 +185,58 @@ int receive_file_bytes(int sockfd,
 
 
 /* =========================================================
-   Validate uploaded filename
+   GET: Send exactly filesize raw bytes
+   ========================================================= */
+
+int send_file_bytes(int sockfd,
+                    FILE *file,
+                    size_t filesize)
+{
+    char buffer[4096];
+
+    size_t total_sent = 0;
+
+    while (total_sent < filesize)
+    {
+        size_t remaining =
+            filesize - total_sent;
+
+        size_t chunk_size =
+            remaining < sizeof(buffer)
+            ? remaining
+            : sizeof(buffer);
+
+        size_t bytes_read =
+            fread(buffer,
+                  1,
+                  chunk_size,
+                  file);
+
+        if (bytes_read == 0)
+        {
+            return -1;
+        }
+
+        if (send_all(sockfd,
+                     buffer,
+                     bytes_read) < 0)
+        {
+            return -1;
+        }
+
+        total_sent += bytes_read;
+    }
+
+    return 0;
+}
+
+
+/* =========================================================
+   Validate filename
    ========================================================= */
 
 int valid_filename(const char *filename)
 {
-    /*
-     * Filename cannot be NULL or empty.
-     */
     if (filename == NULL ||
         filename[0] == '\0')
     {
@@ -206,30 +244,19 @@ int valid_filename(const char *filename)
     }
 
     /*
-     * Do not allow ".." because it could be
-     * used for directory traversal.
+     * Prevent directory traversal.
      */
-    if (strstr(filename,
-               "..") != NULL)
+    if (strstr(filename, "..") != NULL)
     {
         return 0;
     }
 
-    /*
-     * Controller should send only a filename,
-     * not a Unix path.
-     */
-    if (strchr(filename,
-               '/') != NULL)
+    if (strchr(filename, '/') != NULL)
     {
         return 0;
     }
 
-    /*
-     * Also reject Windows-style path separators.
-     */
-    if (strchr(filename,
-               '\\') != NULL)
+    if (strchr(filename, '\\') != NULL)
     {
         return 0;
     }
@@ -239,7 +266,7 @@ int valid_filename(const char *filename)
 
 
 /* =========================================================
-   Handle PUT upload
+   PUT handler
    ========================================================= */
 
 void handle_put(int client_fd,
@@ -247,12 +274,138 @@ void handle_put(int client_fd,
                 size_t filesize)
 {
     char filepath[512];
-
     char response[BUFFER_SIZE];
+
+    if (!valid_filename(filename))
+    {
+        const char *error_response =
+            "ERR INVALID_FILENAME SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    if (filesize > MAX_FILE_SIZE)
+    {
+        const char *error_response =
+            "ERR 004 FILE_TOO_LARGE SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    int path_length =
+        snprintf(filepath,
+                 sizeof(filepath),
+                 "%s/%s",
+                 STORAGE_DIR,
+                 filename);
+
+    if (path_length < 0 ||
+        (size_t)path_length >= sizeof(filepath))
+    {
+        const char *error_response =
+            "ERR INVALID_FILENAME SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    FILE *file =
+        fopen(filepath, "wb");
+
+    if (file == NULL)
+    {
+        perror("fopen");
+
+        const char *error_response =
+            "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    printf("[Child %d] Receiving file %s (%zu bytes)\n",
+           getpid(),
+           filename,
+           filesize);
+
+    if (receive_file_bytes(client_fd,
+                           file,
+                           filesize) < 0)
+    {
+        fclose(file);
+
+        remove(filepath);
+
+        const char *error_response =
+            "ERR FILE_RECEIVE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    if (fclose(file) != 0)
+    {
+        remove(filepath);
+
+        const char *error_response =
+            "ERR FILE_WRITE_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+    snprintf(response,
+             sizeof(response),
+             "OK FILE_RECEIVED %s SID:%s\n",
+             filename,
+             SID);
+
+    send_all(client_fd,
+             response,
+             strlen(response));
+
+    printf("[Child %d] File received successfully: %s (%zu bytes)\n",
+           getpid(),
+           filename,
+           filesize);
+}
+
+
+/* =========================================================
+   GET handler
+   ========================================================= */
+
+void handle_get(int client_fd,
+                const char *filename)
+{
+    char filepath[512];
+    char response[BUFFER_SIZE];
+
+    struct stat file_info;
 
 
     /* -----------------------------------------------------
-       Validate filename
+       1. Validate filename
        ----------------------------------------------------- */
 
     if (!valid_filename(filename))
@@ -269,27 +422,7 @@ void handle_put(int client_fd,
 
 
     /* -----------------------------------------------------
-       Check maximum file size
-       ----------------------------------------------------- */
-
-    if (filesize > MAX_FILE_SIZE)
-    {
-        const char *error_response =
-            "ERR 004 FILE_TOO_LARGE SID:" SID "\n";
-
-        send_all(client_fd,
-                 error_response,
-                 strlen(error_response));
-
-        return;
-    }
-
-
-    /* -----------------------------------------------------
-       Build personalized destination path
-
-       Example:
-       ./agentfiles/IT24103252/put_test.txt
+       2. Build personalized storage path
        ----------------------------------------------------- */
 
     int path_length =
@@ -298,7 +431,6 @@ void handle_put(int client_fd,
                  "%s/%s",
                  STORAGE_DIR,
                  filename);
-
 
     if (path_length < 0 ||
         (size_t)path_length >= sizeof(filepath))
@@ -315,20 +447,14 @@ void handle_put(int client_fd,
 
 
     /* -----------------------------------------------------
-       Open destination in binary-write mode
+       3. Check file exists and get exact size
        ----------------------------------------------------- */
 
-    FILE *file =
-        fopen(filepath,
-              "wb");
-
-
-    if (file == NULL)
+    if (stat(filepath,
+             &file_info) < 0)
     {
-        perror("fopen");
-
         const char *error_response =
-            "ERR FILE_WRITE_FAILED SID:" SID "\n";
+            "ERR 005 FILE_NOT_FOUND SID:" SID "\n";
 
         send_all(client_fd,
                  error_response,
@@ -338,81 +464,115 @@ void handle_put(int client_fd,
     }
 
 
-    printf("[Child %d] Receiving file %s (%zu bytes)\n",
+    if (!S_ISREG(file_info.st_mode))
+    {
+        const char *error_response =
+            "ERR 005 FILE_NOT_FOUND SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    if (file_info.st_size < 0)
+    {
+        const char *error_response =
+            "ERR FILE_READ_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    size_t filesize =
+        (size_t)file_info.st_size;
+
+
+    /* -----------------------------------------------------
+       4. Open file in binary-read mode
+       ----------------------------------------------------- */
+
+    FILE *file =
+        fopen(filepath, "rb");
+
+    if (file == NULL)
+    {
+        const char *error_response =
+            "ERR FILE_READ_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+       5. Send GET response header containing filesize
+       ----------------------------------------------------- */
+
+    int response_length =
+        snprintf(response,
+                 sizeof(response),
+                 "OK FILE %zu SID:%s\n",
+                 filesize,
+                 SID);
+
+
+    if (response_length < 0 ||
+        (size_t)response_length >= sizeof(response))
+    {
+        fclose(file);
+
+        return;
+    }
+
+
+    if (send_all(client_fd,
+                 response,
+                 (size_t)response_length) < 0)
+    {
+        fclose(file);
+
+        return;
+    }
+
+
+    printf("[Child %d] Sending file %s (%zu bytes)\n",
            getpid(),
            filename,
            filesize);
 
 
     /* -----------------------------------------------------
-       Receive exactly <filesize> raw bytes
+       6. Send exactly filesize raw bytes
        ----------------------------------------------------- */
 
-    if (receive_file_bytes(client_fd,
-                           file,
-                           filesize) < 0)
+    if (send_file_bytes(client_fd,
+                        file,
+                        filesize) < 0)
     {
         fclose(file);
 
-        /*
-         * Remove an incomplete file.
-         */
-        remove(filepath);
-
-
-        printf("[Child %d] File transfer failed: %s\n",
+        printf("[Child %d] Failed to send file: %s\n",
                getpid(),
                filename);
 
-
-        const char *error_response =
-            "ERR FILE_RECEIVE_FAILED SID:" SID "\n";
-
-        send_all(client_fd,
-                 error_response,
-                 strlen(error_response));
-
         return;
     }
 
 
-    if (fclose(file) != 0)
-    {
-        remove(filepath);
-
-        const char *error_response =
-            "ERR FILE_WRITE_FAILED SID:" SID "\n";
-
-        send_all(client_fd,
-                 error_response,
-                 strlen(error_response));
-
-        return;
-    }
+    fclose(file);
 
 
-    /* -----------------------------------------------------
-       Successful PUT response
-       ----------------------------------------------------- */
-
-    snprintf(response,
-             sizeof(response),
-             "OK FILE_RECEIVED %s SID:%s\n",
-             filename,
-             SID);
-
-
-    if (send_all(client_fd,
-                 response,
-                 strlen(response)) < 0)
-    {
-        perror("send");
-
-        return;
-    }
-
-
-    printf("[Child %d] File received successfully: %s (%zu bytes)\n",
+    printf("[Child %d] File sent successfully: %s (%zu bytes)\n",
            getpid(),
            filename,
            filesize);
@@ -426,13 +586,9 @@ void handle_put(int client_fd,
 void handle_sysinfo(int client_fd)
 {
     FILE *fp;
-
     char line[BUFFER_SIZE];
 
-
-    fp = popen("uname -a",
-               "r");
-
+    fp = popen("uname -a", "r");
 
     if (fp == NULL)
     {
@@ -446,15 +602,12 @@ void handle_sysinfo(int client_fd)
         return;
     }
 
-
     const char *start =
         "OK SYSINFO SID:" SID "\n";
-
 
     send_all(client_fd,
              start,
              strlen(start));
-
 
     while (fgets(line,
                  sizeof(line),
@@ -465,13 +618,10 @@ void handle_sysinfo(int client_fd)
                  strlen(line));
     }
 
-
     pclose(fp);
-
 
     const char *end =
         "END SYSINFO SID:" SID "\n";
-
 
     send_all(client_fd,
              end,
@@ -486,13 +636,9 @@ void handle_sysinfo(int client_fd)
 void handle_listproc(int client_fd)
 {
     FILE *fp;
-
     char line[BUFFER_SIZE];
 
-
-    fp = popen("ps -eo pid,comm",
-               "r");
-
+    fp = popen("ps -eo pid,comm", "r");
 
     if (fp == NULL)
     {
@@ -506,15 +652,12 @@ void handle_listproc(int client_fd)
         return;
     }
 
-
     const char *start =
         "OK LISTPROC SID:" SID "\n";
-
 
     send_all(client_fd,
              start,
              strlen(start));
-
 
     while (fgets(line,
                  sizeof(line),
@@ -525,13 +668,10 @@ void handle_listproc(int client_fd)
                  strlen(line));
     }
 
-
     pclose(fp);
-
 
     const char *end =
         "END LISTPROC SID:" SID "\n";
-
 
     send_all(client_fd,
              end,
@@ -540,7 +680,7 @@ void handle_listproc(int client_fd)
 
 
 /* =========================================================
-   EXEC whitelist
+   EXEC
    ========================================================= */
 
 void handle_exec(int client_fd,
@@ -548,37 +688,26 @@ void handle_exec(int client_fd,
 {
     const char *system_command = NULL;
 
-
-    if (strcmp(exec_name,
-               "DATE") == 0)
+    if (strcmp(exec_name, "DATE") == 0)
     {
         system_command = "date";
     }
-
-    else if (strcmp(exec_name,
-                    "UPTIME") == 0)
+    else if (strcmp(exec_name, "UPTIME") == 0)
     {
         system_command = "uptime";
     }
-
-    else if (strcmp(exec_name,
-                    "DISKFREE") == 0)
+    else if (strcmp(exec_name, "DISKFREE") == 0)
     {
         system_command = "df -h";
     }
-
-    else if (strcmp(exec_name,
-                    "HOSTNAME") == 0)
+    else if (strcmp(exec_name, "HOSTNAME") == 0)
     {
         system_command = "hostname";
     }
-
-    else if (strcmp(exec_name,
-                    "WHOAMI") == 0)
+    else if (strcmp(exec_name, "WHOAMI") == 0)
     {
         system_command = "whoami";
     }
-
     else
     {
         const char *response =
@@ -591,11 +720,8 @@ void handle_exec(int client_fd,
         return;
     }
 
-
     FILE *fp =
-        popen(system_command,
-              "r");
-
+        popen(system_command, "r");
 
     if (fp == NULL)
     {
@@ -609,9 +735,7 @@ void handle_exec(int client_fd,
         return;
     }
 
-
     char response[BUFFER_SIZE];
-
 
     snprintf(response,
              sizeof(response),
@@ -619,14 +743,11 @@ void handle_exec(int client_fd,
              exec_name,
              SID);
 
-
     send_all(client_fd,
              response,
              strlen(response));
 
-
     char line[BUFFER_SIZE];
-
 
     while (fgets(line,
                  sizeof(line),
@@ -637,16 +758,13 @@ void handle_exec(int client_fd,
                  strlen(line));
     }
 
-
     pclose(fp);
-
 
     snprintf(response,
              sizeof(response),
              "END EXEC %s SID:%s\n",
              exec_name,
              SID);
-
 
     send_all(client_fd,
              response,
@@ -655,50 +773,34 @@ void handle_exec(int client_fd,
 
 
 /* =========================================================
-   Main Agent
+   MAIN
    ========================================================= */
 
 int main(void)
 {
     int server_fd;
-
     int client_fd;
-
     int opt = 1;
 
-
     struct sockaddr_in server_addr;
-
     struct sockaddr_in client_addr;
-
 
     socklen_t client_len;
 
-
-    /* =====================================================
-       STEP 1: Create TCP socket
-       ===================================================== */
 
     server_fd =
         socket(AF_INET,
                SOCK_STREAM,
                0);
 
-
     if (server_fd < 0)
     {
         perror("socket");
-
         return EXIT_FAILURE;
     }
 
-
     printf("TCP socket created successfully.\n");
 
-
-    /* =====================================================
-       STEP 2: Allow address reuse
-       ===================================================== */
 
     if (setsockopt(server_fd,
                    SOL_SOCKET,
@@ -714,30 +816,19 @@ int main(void)
     }
 
 
-    /* =====================================================
-       STEP 3: Prepare server address
-       ===================================================== */
-
     memset(&server_addr,
            0,
            sizeof(server_addr));
 
-
     server_addr.sin_family =
         AF_INET;
-
 
     server_addr.sin_addr.s_addr =
         htonl(INADDR_ANY);
 
-
     server_addr.sin_port =
         htons(PORT);
 
-
-    /* =====================================================
-       STEP 4: Bind
-       ===================================================== */
 
     if (bind(server_fd,
              (struct sockaddr *)&server_addr,
@@ -750,14 +841,9 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-
     printf("Agent bound to TCP port %d.\n",
            PORT);
 
-
-    /* =====================================================
-       STEP 5: Listen
-       ===================================================== */
 
     if (listen(server_fd,
                BACKLOG) < 0)
@@ -769,33 +855,23 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-
     printf("RemoteOps Agent listening on port %d...\n",
            PORT);
 
 
-    /*
-     * Prevent zombie child processes.
-     */
     signal(SIGCHLD,
            SIG_IGN);
 
-
-    /* =====================================================
-       STEP 6: Accept Controllers
-       ===================================================== */
 
     while (1)
     {
         client_len =
             sizeof(client_addr);
 
-
         client_fd =
             accept(server_fd,
                    (struct sockaddr *)&client_addr,
                    &client_len);
-
 
         if (client_fd < 0)
         {
@@ -815,10 +891,6 @@ int main(void)
                ntohs(client_addr.sin_port));
 
 
-        /* =================================================
-           STEP 7: Fork
-           ================================================= */
-
         pid_t pid =
             fork();
 
@@ -835,10 +907,6 @@ int main(void)
 
         if (pid == 0)
         {
-            /* =============================================
-               CHILD PROCESS
-               ============================================= */
-
             char buffer[BUFFER_SIZE];
 
             ssize_t bytes_received;
@@ -855,9 +923,9 @@ int main(void)
                    ntohs(client_addr.sin_port));
 
 
-            /* =============================================
-               STEP 8: AUTH
-               ============================================= */
+            /* =================================================
+               AUTH
+               ================================================= */
 
             bytes_received =
                 recv_line(client_fd,
@@ -867,9 +935,6 @@ int main(void)
 
             if (bytes_received <= 0)
             {
-                printf("[Child %d] Controller disconnected before AUTH.\n",
-                       getpid());
-
                 close(client_fd);
 
                 exit(EXIT_SUCCESS);
@@ -892,8 +957,6 @@ int main(void)
                              response,
                              strlen(response)) < 0)
                 {
-                    perror("send");
-
                     close(client_fd);
 
                     exit(EXIT_FAILURE);
@@ -918,19 +981,15 @@ int main(void)
                          strlen(response));
 
 
-                printf("[Child %d] Authentication failed.\n",
-                       getpid());
-
-
                 close(client_fd);
 
                 exit(EXIT_SUCCESS);
             }
 
 
-            /* =============================================
-               STEP 9: Authenticated command loop
-               ============================================= */
+            /* =================================================
+               Authenticated command loop
+               ================================================= */
 
             while (authenticated)
             {
@@ -962,9 +1021,7 @@ int main(void)
                        buffer);
 
 
-                /* =========================================
-                   SYSINFO
-                   ========================================= */
+                /* SYSINFO */
 
                 if (strcmp(buffer,
                            "SYSINFO") == 0)
@@ -973,9 +1030,7 @@ int main(void)
                 }
 
 
-                /* =========================================
-                   LISTPROC
-                   ========================================= */
+                /* LISTPROC */
 
                 else if (strcmp(buffer,
                                 "LISTPROC") == 0)
@@ -984,9 +1039,7 @@ int main(void)
                 }
 
 
-                /* =========================================
-                   EXEC
-                   ========================================= */
+                /* EXEC */
 
                 else if (strncmp(buffer,
                                  "EXEC ",
@@ -997,12 +1050,7 @@ int main(void)
                 }
 
 
-                /* =========================================
-                   PUT
-
-                   Expected command:
-                   PUT <filename> <filesize>
-                   ========================================= */
+                /* PUT */
 
                 else if (strncmp(buffer,
                                  "PUT ",
@@ -1015,14 +1063,6 @@ int main(void)
                     char extra;
 
 
-                    /*
-                     * Require exactly:
-                     *
-                     * filename
-                     * filesize
-                     *
-                     * The %c detects unexpected extra text.
-                     */
                     int parsed =
                         sscanf(buffer + 4,
                                "%255s %llu %c",
@@ -1063,9 +1103,52 @@ int main(void)
                 }
 
 
-                /* =========================================
-                   Unknown command
-                   ========================================= */
+                /* =================================================
+                   GET
+
+                   Expected:
+                   GET <filename>
+                   ================================================= */
+
+                else if (strncmp(buffer,
+                                 "GET ",
+                                 4) == 0)
+                {
+                    char filename[256];
+
+                    char extra;
+
+
+                    /*
+                     * Require exactly one filename.
+                     */
+                    int parsed =
+                        sscanf(buffer + 4,
+                               "%255s %c",
+                               filename,
+                               &extra);
+
+
+                    if (parsed != 1)
+                    {
+                        const char *response =
+                            "ERR INVALID_GET_FORMAT SID:" SID "\n";
+
+
+                        send_all(client_fd,
+                                 response,
+                                 strlen(response));
+                    }
+
+                    else
+                    {
+                        handle_get(client_fd,
+                                   filename);
+                    }
+                }
+
+
+                /* Unknown */
 
                 else
                 {
@@ -1077,8 +1160,6 @@ int main(void)
                                  response,
                                  strlen(response)) < 0)
                     {
-                        perror("send");
-
                         break;
                     }
                 }
@@ -1092,10 +1173,6 @@ int main(void)
 
         else
         {
-            /* =============================================
-               PARENT PROCESS
-               ============================================= */
-
             close(client_fd);
         }
     }
