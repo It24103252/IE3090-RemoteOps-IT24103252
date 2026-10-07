@@ -656,7 +656,8 @@ void handle_get(int client_fd,
     int response_length =
         snprintf(response,
                  sizeof(response),
-                 "OK FILE %zu SID:%s\n",
+                 "OK FILE_SEND %s %zu SID:%s\n",
+                 filename,
                  filesize,
                  SID);
 
@@ -982,57 +983,77 @@ void run_udp_monitor(struct in_addr controller_ip,
 void handle_listproc(int client_fd)
 {
     FILE *fp;
+    char line[256];
+    char process_list[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+    size_t used = 0;
 
-    char line[BUFFER_SIZE];
+    process_list[0] = '\0';
 
-
-    fp = popen("ps -eo pid,comm", "r");
-
+    fp = popen("ps -eo pid=,comm=", "r");
 
     if (fp == NULL)
     {
-        const char *response =
+        const char *error_response =
             "ERR LISTPROC_FAILED SID:" SID "\n";
 
-
         send_all(client_fd,
-                 response,
-                 strlen(response));
-
-
+                 error_response,
+                 strlen(error_response));
         return;
     }
 
-
-    const char *start =
-        "OK LISTPROC SID:" SID "\n";
-
-
-    send_all(client_fd,
-             start,
-             strlen(start));
-
-
-    while (fgets(line,
-                 sizeof(line),
-                 fp) != NULL)
+    while (fgets(line, sizeof(line), fp) != NULL)
     {
-        send_all(client_fd,
-                 line,
-                 strlen(line));
-    }
+        line[strcspn(line, "\r\n")] = '\0';
 
+        if (line[0] == '\0')
+        {
+            continue;
+        }
+
+        size_t line_length = strlen(line);
+
+        if (used + line_length + 2 >= sizeof(process_list) - 32)
+        {
+            break;
+        }
+
+        if (used > 0)
+        {
+            process_list[used++] = ',';
+            process_list[used++] = ' ';
+            process_list[used] = '\0';
+        }
+
+        memcpy(process_list + used, line, line_length + 1);
+        used += line_length;
+    }
 
     pclose(fp);
 
+    int response_length =
+        snprintf(response,
+                 sizeof(response),
+                 "OK PROCS %s SID:%s\n",
+                 process_list,
+                 SID);
 
-    const char *end =
-        "END LISTPROC SID:" SID "\n";
+    if (response_length < 0 ||
+        (size_t)response_length >= sizeof(response))
+    {
+        const char *error_response =
+            "ERR LISTPROC_FAILED SID:" SID "\n";
 
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+        return;
+    }
 
     send_all(client_fd,
-             end,
-             strlen(end));
+             response,
+             (size_t)response_length);
 }
 
 
@@ -1045,106 +1066,92 @@ void handle_exec(int client_fd,
 {
     const char *system_command = NULL;
 
-
     if (strcmp(exec_name, "DATE") == 0)
-    {
         system_command = "date";
-    }
-
     else if (strcmp(exec_name, "UPTIME") == 0)
-    {
         system_command = "uptime";
-    }
-
     else if (strcmp(exec_name, "DISKFREE") == 0)
-    {
         system_command = "df -h";
-    }
-
     else if (strcmp(exec_name, "HOSTNAME") == 0)
-    {
         system_command = "hostname";
-    }
-
     else if (strcmp(exec_name, "WHOAMI") == 0)
-    {
         system_command = "whoami";
-    }
-
     else
     {
         const char *response =
-            "ERR EXEC_NOT_ALLOWED SID:" SID "\n";
+            "ERR 002 COMMAND_NOT_ALLOWED SID:" SID "\n";
 
-
-        send_all(client_fd,
-                 response,
-                 strlen(response));
-
-
+        send_all(client_fd, response, strlen(response));
         return;
     }
 
-
     FILE *fp = popen(system_command, "r");
-
 
     if (fp == NULL)
     {
         const char *response =
             "ERR EXEC_FAILED SID:" SID "\n";
 
-
-        send_all(client_fd,
-                 response,
-                 strlen(response));
-
-
+        send_all(client_fd, response, strlen(response));
         return;
     }
 
+    char line[256];
+    char output[BUFFER_SIZE];
+    size_t used = 0;
 
-    char response[BUFFER_SIZE];
+    output[0] = '\0';
 
-
-    snprintf(response,
-             sizeof(response),
-             "OK EXEC %s SID:%s\n",
-             exec_name,
-             SID);
-
-
-    send_all(client_fd,
-             response,
-             strlen(response));
-
-
-    char line[BUFFER_SIZE];
-
-
-    while (fgets(line,
-                 sizeof(line),
-                 fp) != NULL)
+    while (fgets(line, sizeof(line), fp) != NULL)
     {
-        send_all(client_fd,
-                 line,
-                 strlen(line));
-    }
+        line[strcspn(line, "\r\n")] = '\0';
 
+        if (line[0] == '\0')
+            continue;
+
+        size_t line_length = strlen(line);
+
+        if (used + line_length + 3 >= sizeof(output) - 32)
+            break;
+
+        if (used > 0)
+        {
+            output[used++] = ' ';
+            output[used++] = '|';
+            output[used++] = ' ';
+            output[used] = '\0';
+        }
+
+        memcpy(output + used, line, line_length + 1);
+        used += line_length;
+    }
 
     pclose(fp);
 
+    char response[BUFFER_SIZE];
 
-    snprintf(response,
-             sizeof(response),
-             "END EXEC %s SID:%s\n",
-             exec_name,
-             SID);
+    int response_length =
+        snprintf(response,
+                 sizeof(response),
+                 "OK EXEC_RESULT %s SID:%s\n",
+                 output,
+                 SID);
 
+    if (response_length < 0 ||
+        (size_t)response_length >= sizeof(response))
+    {
+        const char *error_response =
+            "ERR EXEC_FAILED SID:" SID "\n";
+
+        send_all(client_fd,
+                 error_response,
+                 strlen(error_response));
+        return;
+    }
 
     send_all(client_fd,
              response,
-             strlen(response));
+             (size_t)response_length);
 }
 
 
@@ -1797,11 +1804,11 @@ int main(void)
 
                 /* =================================================
                    Part 11 Change 3:
-                   Graceful EXIT
+                   Graceful QUIT
                    ================================================= */
 
                 else if (strcmp(buffer,
-                                "EXIT") == 0)
+                                "QUIT") == 0)
                 {
                     /*
                      * Stop UDP monitor first if it is
@@ -1826,7 +1833,7 @@ int main(void)
 
 
                         printf("[Child %d] UDP monitor PID %d stopped "
-                               "during graceful EXIT.\n",
+                               "during graceful QUIT.\n",
                                getpid(),
                                old_monitor_pid);
                     }

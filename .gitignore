@@ -1,3 +1,15 @@
+# RemoteOps runtime and test files
+agentfiles/
+downloads/
+put_test.txt
+
+# Compiled executables
 agent
 controller
-*.o
+
+# Local backup source files
+*_backup.c
+*_before_protocol_fix.c
+
+# Runtime files
+remoteops_IT24103252.log

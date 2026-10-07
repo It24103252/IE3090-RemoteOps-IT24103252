@@ -523,6 +523,8 @@ void download_file(int sockfd,
 
     unsigned long long file_size_value;
 
+    char received_filename[256];
+
     char received_sid[64];
 
 
@@ -588,12 +590,13 @@ void download_file(int sockfd,
 
     int parsed =
         sscanf(response,
-               "OK FILE %llu SID:%63s",
+               "OK FILE_SEND %255s %llu SID:%63s",
+               received_filename,
                &file_size_value,
                received_sid);
 
 
-    if (parsed != 2)
+    if (parsed != 3)
     {
         printf("Invalid GET response from Agent.\n");
 
@@ -605,6 +608,15 @@ void download_file(int sockfd,
                SID) != 0)
     {
         printf("SID mismatch in GET response.\n");
+
+        return;
+    }
+
+
+    if (strcmp(received_filename,
+               filename) != 0)
+    {
+        printf("Filename mismatch in GET response.\n");
 
         return;
     }
@@ -1059,12 +1071,24 @@ int main(int argc,
             }
 
 
-            if (receive_command_response(
-                    sockfd,
-                    "END LISTPROC SID:" SID) < 0)
+            bytes_received =
+                recv_line(sockfd,
+                          buffer,
+                          sizeof(buffer));
+
+            if (bytes_received == 0)
             {
+                printf("Agent closed the connection.\n");
                 break;
             }
+
+            if (bytes_received < 0)
+            {
+                perror("recv");
+                break;
+            }
+
+            printf("%s\n", buffer);
         }
 
 
@@ -1125,32 +1149,24 @@ int main(int argc,
             }
 
 
-            char end_marker[BUFFER_SIZE];
+            bytes_received =
+                recv_line(sockfd,
+                          buffer,
+                          sizeof(buffer));
 
-
-            int marker_length =
-                snprintf(end_marker,
-                         sizeof(end_marker),
-                         "END EXEC %s SID:%s",
-                         exec_name,
-                         SID);
-
-
-            if (marker_length < 0 ||
-                (size_t)marker_length >= sizeof(end_marker))
+            if (bytes_received == 0)
             {
-                printf("Unable to create EXEC end marker.\n");
-
+                printf("Agent closed the connection.\n");
                 break;
             }
 
-
-            if (receive_command_response(
-                    sockfd,
-                    end_marker) < 0)
+            if (bytes_received < 0)
             {
+                perror("recv");
                 break;
             }
+
+            printf("%s\n", buffer);
         }
 
 
@@ -1548,21 +1564,21 @@ int main(int argc,
 
 
         /* =================================================
-           Part 11 - Graceful EXIT
+           Part 11 - Graceful QUIT
            ================================================= */
 
         else if (strcmp(buffer,
-                        "EXIT") == 0)
+                        "QUIT") == 0)
         {
             const char *command =
-                "EXIT\n";
+                "QUIT\n";
 
 
             /*
              * Stop the local UDP listener first.
              *
              * The Agent will stop its own monitor child
-             * when it receives EXIT.
+             * when it receives QUIT.
              */
             if (udp_listener_pid > 0)
             {
@@ -1588,13 +1604,13 @@ int main(int argc,
 
 
             /*
-             * Send graceful EXIT to Agent.
+             * Send graceful QUIT to Agent.
              */
             if (send_all(sockfd,
                          command,
                          strlen(command)) < 0)
             {
-                perror("send EXIT");
+                perror("send QUIT");
 
                 break;
             }
@@ -1620,7 +1636,7 @@ int main(int argc,
 
             if (bytes_received < 0)
             {
-                perror("recv EXIT");
+                perror("recv QUIT");
 
                 break;
             }
@@ -1638,7 +1654,7 @@ int main(int argc,
 
             else
             {
-                printf("Unexpected EXIT response from Agent.\n");
+                printf("Unexpected QUIT response from Agent.\n");
             }
 
 
@@ -1717,7 +1733,7 @@ int main(int argc,
        Final cleanup
 
        This is mainly for abnormal/local Controller exit.
-       Graceful EXIT already sets udp_listener_pid and
+       Graceful QUIT already sets udp_listener_pid and
        udp_fd to inactive values.
        ===================================================== */
 

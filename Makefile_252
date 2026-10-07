@@ -1,0 +1,21 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -Wpedantic
+
+AGENT = agent
+CONTROLLER = controller
+
+AGENT_SRC = agent_252.c
+CONTROLLER_SRC = controller_252.c
+
+all: $(AGENT) $(CONTROLLER)
+
+$(AGENT): $(AGENT_SRC)
+	$(CC) $(CFLAGS) $(AGENT_SRC) -o $(AGENT)
+
+$(CONTROLLER): $(CONTROLLER_SRC)
+	$(CC) $(CFLAGS) $(CONTROLLER_SRC) -o $(CONTROLLER)
+
+clean:
+	rm -f $(AGENT) $(CONTROLLER)
+
+.PHONY: all clean
